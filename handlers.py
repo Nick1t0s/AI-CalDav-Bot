@@ -11,6 +11,7 @@ from html import escape as esc
 from typing import Optional
 
 from aiogram import F, Router
+from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
@@ -45,6 +46,7 @@ from confirmation import (
 )
 from formatting import (
     describe_event,
+    describe_rrule,
     format_delete_confirm,
     format_delete_question,
     format_event_list,
@@ -186,6 +188,7 @@ def _build_payload(intent: dict) -> Optional[dict]:
         "duration": timedelta(minutes=int(duration_min)),
         "location": intent.get("location") or None,
         "description": intent.get("description") or None,
+        "rrule": intent.get("rrule") or None,
     }
 
 
@@ -231,6 +234,7 @@ async def on_message(message: Message) -> None:
     text = message.text.strip()
     if not text or text.startswith("/"):
         return
+    await message.bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
     try:
         intent = await asyncio.to_thread(parse_intent, text)
     except IntentParseError as exc:
@@ -507,9 +511,12 @@ async def _run_create(cb: CallbackQuery, op: CreateOp) -> None:
             duration=payload["duration"],
             location=payload.get("location"),
             description=payload.get("description"),
+            rrule=payload.get("rrule"),
         )
         when = "весь день" if created.all_day else f"{created.start:%H:%M}"
         text = f"✅ Создано: «{esc(created.summary)}» ({fmt_dtime(created.start)}, {when})"
+        if created.is_recurring:
+            text += f" 🔁 {describe_rrule(created.rrule)}"
     except CalDAVError as exc:
         text = f"❌ Ошибка: {esc(str(exc))}"
     await _safe_edit(cb.message, text)

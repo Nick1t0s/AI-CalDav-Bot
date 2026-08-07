@@ -8,6 +8,9 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from typing import Optional
+
+from icalendar import vRecur
 
 import config
 
@@ -30,6 +33,7 @@ SYSTEM_PROMPT = """Ты — «переводчик» фраз пользоват
   "summary": "название нового события (для create) или null",
   "start": "YYYY-MM-DDTHH:MM:SS или null",
   "duration": "длительность в минутах или null",
+  "rrule": "правило повтора (iCal RRULE) для create или null",
   "location": "место или null",
   "description": "описание или null",
   "apply_to": "instance | all | null (для delete/update повторяющегося события)",
@@ -61,6 +65,18 @@ SYSTEM_PROMPT = """Ты — «переводчик» фраз пользоват
 8. Если фраза — мусор, оффтоп или не про календарь («флбфваапр», «привет», «расскажи анекдот») — \
 intent = "none", все остальные поля null.
 9. НЕ выдумывай события и факты. Неизвестные поля = null. Без лишних ключей в JSON.
+10. create повторяющегося события: если пользователь просит повтор («каждый…»,
+    «еженедельно», «ежедневно», «по будням»), ОБЯЗАТЕЛЬНО заполняй rrule, а не
+    создавай одноразовое событие. rrule — iCal RRULE:
+    «каждый день» → FREQ=DAILY
+    «каждый понедельник/вторник/...» → FREQ=WEEKLY;BYDAY=MO (MO,TU,WE,TH,FR,SA,SU)
+    «каждый пн и ср» → FREQ=WEEKLY;BYDAY=MO,WE
+    «по будням» → FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
+    «каждую неделю» → FREQ=WEEKLY
+    «каждый месяц» → FREQ=MONTHLY
+    «каждый год» → FREQ=YEARLY
+    start при этом = дата и время первого вхождения. Для недельного повтора день
+    недели start должен совпадать с BYDAY.
 """
 
 
@@ -82,6 +98,9 @@ def build_system_prompt() -> str:
 - «отмени завтрашнее занятие» → {"intent":"delete","date_from":"2026-08-08","date_to":"2026-08-08","query":"занятие",...}
 - «отмени все повторения английского» → {"intent":"delete",...,"query":"английск","apply_to":"all",...}
 - «создай встречу с Аней завтра в 14:00 на час» → {"intent":"create","summary":"Встреча с Аней","start":"2026-08-08T14:00:00","duration":60,...}
+- «создай вычесывание бобров каждый понедельник с 16 до 17» → {"intent":"create","summary":"Вычесывание бобров","start":"2026-08-10T16:00:00","duration":60,"rrule":"FREQ=WEEKLY;BYDAY=MO",...}
+- «создай тренировку по будням в 8 утра на час» → {"intent":"create","summary":"Тренировка","start":"2026-08-10T08:00:00","duration":60,"rrule":"FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",...}
+- «создай напоминание каждый день в 9:00» → {"intent":"create","summary":"Напоминание","start":"2026-08-08T09:00:00","duration":60,"rrule":"FREQ=DAILY",...}
 - «перенеси занятие завтра на 20:00» → {"intent":"update",...,"query":"занятие","changes":{"start":"2026-08-08T20:00:00",...}}
 - «сдвинь тренировку на час позже» → {"intent":"update",...,"changes":{"shift_minutes":60},...}
 - «флбфваапр» → {"intent":"none",...}
@@ -114,6 +133,30 @@ def _extract_json_list(content: str) -> list:
     return json.loads(content[start : end + 1])
 
 
+def _normalize_rrule(value) -> Optional[str]:
+    """RRULE: нормализация (заглавные, без RRULE: и пробелов) + валидация."""
+    if not value:
+        return None
+    if not isinstance(value, str):
+        raise IntentParseError("rrule должен быть строкой")
+    value = value.strip()
+    if value.upper().startswith("RRULE:"):
+        value = value[len("RRULE:"):]
+    value = re.sub(r"\s+", "", value).upper()
+    if not value:
+        return None
+    if not re.fullmatch(r"(?:[A-Z0-9]+=[^;]+;)*[A-Z0-9]+=[^;]+", value):
+        raise IntentParseError(f"некорректное правило повтора: {value!r}")
+    freq_match = re.search(r"(?:^|;)FREQ=([A-Z0-9]+)", value)
+    if not freq_match or freq_match.group(1) not in {"DAILY", "WEEKLY", "MONTHLY", "YEARLY"}:
+        raise IntentParseError(f"некорректное правило повтора: {value!r}")
+    try:
+        vRecur.from_ical(value)
+    except Exception as exc:
+        raise IntentParseError(f"некорректное правило повтора: {value!r}") from exc
+    return value
+
+
 def _clean(data: dict) -> dict:
     for key in ("date_from", "date_to", "query", "summary", "start", "location", "description"):
         value = data.get(key)
@@ -122,6 +165,7 @@ def _clean(data: dict) -> dict:
         if isinstance(value, str):
             value = value.strip()
         data[key] = value or None
+    data["rrule"] = _normalize_rrule(data.get("rrule"))
     intent = data.get("intent")
     if intent not in VALID_INTENTS:
         raise IntentParseError(f"неизвестный intent: {intent!r}")

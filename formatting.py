@@ -264,6 +264,8 @@ def format_new_event_preview(payload: dict) -> str:
     lines.append(f"📌 Название: <b>«{esc(payload['summary'])}»</b>")
     lines.append(f"📅 Дата: {fmt_date(start.date())}")
     lines.append(f"🕐 Время: {start:%H:%M}–{end:%H:%M}")
+    if payload.get("rrule"):
+        lines.append(f"🔁 Повтор: {describe_rrule(payload['rrule'])}")
     if payload.get("location"):
         lines.append(f"📍 Место: {esc(payload['location'])}")
     if payload.get("description"):

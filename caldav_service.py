@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import caldav
 import icalendar
+from icalendar import vRecur
 import recurring_ical_events
 
 import config
@@ -198,6 +199,7 @@ class CalDAVClient:
         duration: timedelta,
         location: Optional[str] = None,
         description: Optional[str] = None,
+        rrule: Optional[str] = None,
     ) -> EventData:
         start_utc = _ensure_aware(start).astimezone(UTC)
         end_utc = start_utc + duration
@@ -210,6 +212,8 @@ class CalDAVClient:
         event.add("dtstart", start_utc)
         event.add("dtend", end_utc)
         event.add("summary", summary)
+        if rrule:
+            event.add("rrule", vRecur.from_ical(rrule))
         if location:
             event.add("location", location)
         if description:
@@ -222,7 +226,7 @@ class CalDAVClient:
             raise CalDAVError(f"Не удалось создать событие: {exc}") from exc
         if created is not None:
             try:
-                return self._to_event_data(_get_vevent(created.icalendar_instance), created, False)
+                return self._to_event_data(_get_vevent(created.icalendar_instance), created, bool(rrule), rrule)
             except Exception:
                 pass
         return EventData(
@@ -234,7 +238,8 @@ class CalDAVClient:
             start=_norm(start_utc),
             end=_norm(end_utc),
             all_day=False,
-            is_recurring=False,
+            is_recurring=bool(rrule),
+            rrule=rrule,
         )
 
     # ---------- удаление ----------
@@ -390,8 +395,9 @@ def create_event(
     duration: timedelta,
     location: Optional[str] = None,
     description: Optional[str] = None,
+    rrule: Optional[str] = None,
 ) -> EventData:
-    return get_client().create_event(summary, start, duration, location, description)
+    return get_client().create_event(summary, start, duration, location, description, rrule)
 
 
 def delete_event(ev: EventData) -> None:
