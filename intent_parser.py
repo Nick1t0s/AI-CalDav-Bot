@@ -102,6 +102,18 @@ def _extract_json(content: str) -> dict:
     return json.loads(content[start : end + 1])
 
 
+def _extract_json_list(content: str) -> list:
+    content = content.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL | re.IGNORECASE)
+    if fence:
+        content = fence.group(1).strip()
+    start = content.find("[")
+    end = content.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        raise IntentParseError("LLM вернул ответ без массива")
+    return json.loads(content[start : end + 1])
+
+
 def _clean(data: dict) -> dict:
     for key in ("date_from", "date_to", "query", "summary", "start", "location", "description"):
         value = data.get(key)
@@ -130,11 +142,10 @@ def _clean(data: dict) -> dict:
     return data
 
 
-def parse_intent(text: str) -> dict:
+def _ask_llm(system: str, user: str) -> str:
+    """Один вызов LLM; возвращает сырой текст ответа."""
     if not config.OPENAI_API_KEY:
         raise IntentParseError("не настроен OPENAI_API_KEY")
-    if not text.strip():
-        raise IntentParseError("пустой запрос")
     from openai import OpenAI
 
     client = OpenAI(
@@ -146,15 +157,57 @@ def parse_intent(text: str) -> dict:
         response = client.chat.completions.create(
             model=config.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": build_system_prompt()},
-                {"role": "user", "content": text.strip()},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
             temperature=0,
         )
     except Exception as exc:
         raise IntentParseError(f"ошибка LLM: {exc}") from exc
-    content = response.choices[0].message.content or ""
+    return response.choices[0].message.content or ""
+
+
+def parse_intent(text: str) -> dict:
+    if not text.strip():
+        raise IntentParseError("пустой запрос")
     try:
-        return _clean(_extract_json(content))
+        return _clean(_extract_json(_ask_llm(build_system_prompt(), text.strip())))
     except json.JSONDecodeError as exc:
         raise IntentParseError(f"LLM вернул некорректный JSON: {exc}") from exc
+
+
+MATCH_SYSTEM_PROMPT = """Ты подбираешь события календаря под вопрос пользователя. \
+Тебе дан пронумерованный список событий (каждая строка — «номер. описание»). \
+Верни СТРОГО ОДИН валидный JSON — массив номеров строк, которые соответствуют \
+вопросу. Если ничего не подходит — верни []. Учитывай смысл: перестановку слов, \
+аббревиатуры, перефразирование. Не выдумывай номера вне списка и не добавляй \
+пояснения и markdown-обёртки.
+"""
+
+
+def match_events(question: str, catalog: str) -> list[int]:
+    """Номера (1-based) строк каталога, подходящих под вопрос пользователя."""
+    if not question.strip():
+        return []
+    content = _ask_llm(
+        MATCH_SYSTEM_PROMPT,
+        f"Вопрос: {question.strip()}\n\nСписок событий:\n{catalog}",
+    )
+    try:
+        numbers = _extract_json_list(content)
+    except (json.JSONDecodeError, IntentParseError) as exc:
+        raise IntentParseError(f"LLM вернул некорректный список номеров: {exc}") from exc
+    if not isinstance(numbers, list):
+        raise IntentParseError("LLM вернул не массив номеров")
+    total = len([line for line in catalog.splitlines() if line.strip()])
+    seen: set[int] = set()
+    out: list[int] = []
+    for n in numbers:
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= total and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out

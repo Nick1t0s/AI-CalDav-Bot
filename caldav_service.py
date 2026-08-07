@@ -39,6 +39,10 @@ class EventData:
     all_day: bool
     is_recurring: bool
     instance_start: Optional[datetime] = None
+    rrule: Optional[str] = None  # сырая RRULE мастер-события (для серий)
+    series_count: int = 1  # сколько вхождений серии в запрошенном периоде
+    series_first: Optional[datetime] = None
+    series_last: Optional[datetime] = None
 
     @property
     def duration(self) -> timedelta:
@@ -147,17 +151,21 @@ class CalDAVClient:
     def _expand(self, master, start: datetime, end: datetime) -> list[EventData]:
         cal = master.icalendar_instance
         master_vevent = _get_vevent(cal)
-        is_recurring = master_vevent.get("RRULE") is not None
+        rrule_obj = master_vevent.get("RRULE")
+        is_recurring = rrule_obj is not None
+        rrule = rrule_obj.to_ical().decode() if rrule_obj is not None else None
         out: list[EventData] = []
         try:
             occurrences = recurring_ical_events.of(cal).between(start, end)
         except Exception:
             return out
         for vevent in occurrences:
-            out.append(self._to_event_data(vevent, master, is_recurring))
+            out.append(self._to_event_data(vevent, master, is_recurring, rrule))
         return out
 
-    def _to_event_data(self, vevent, master, is_recurring: bool) -> EventData:
+    def _to_event_data(
+        self, vevent, master, is_recurring: bool, rrule: Optional[str] = None
+    ) -> EventData:
         raw_start = vevent.decoded("DTSTART")
         raw_end = vevent.decoded("DTEND")
         all_day = _is_all_day(raw_start)
@@ -178,6 +186,7 @@ class CalDAVClient:
             all_day=all_day,
             is_recurring=is_recurring,
             instance_start=start if is_recurring else None,
+            rrule=rrule,
         )
 
     # ---------- создание ----------
@@ -347,6 +356,32 @@ def get_client() -> CalDAVClient:
 
 def list_events(start: datetime, end: datetime) -> list[EventData]:
     return get_client().list_events(start, end)
+
+
+def collapse_events(events: list[EventData]) -> list[EventData]:
+    """Свернуть повторяющиеся серии в одно событие с описанием повтора.
+
+    Серия идентифицируется по URL мастер-события; представитель — первое
+    вхождение в периоде. У представителя заполняются series_count и span.
+    """
+    groups: dict[str, list[EventData]] = {}
+    singles: list[EventData] = []
+    for ev in events:
+        if ev.is_recurring and ev.url:
+            groups.setdefault(ev.url, []).append(ev)
+        else:
+            singles.append(ev)
+    out: list[EventData] = []
+    for group in groups.values():
+        group.sort(key=lambda e: e.start)
+        rep = group[0]
+        rep.series_count = len(group)
+        rep.series_first = group[0].start
+        rep.series_last = group[-1].start
+        out.append(rep)
+    out.extend(singles)
+    out.sort(key=lambda e: (e.start, e.summary))
+    return out
 
 
 def create_event(

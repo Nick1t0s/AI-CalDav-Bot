@@ -1,8 +1,12 @@
 """Рендер событий на русском (HTML для Telegram)."""
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 from html import escape as esc
+from typing import Optional
+
+from icalendar import vRecur
 
 import config
 
@@ -11,6 +15,12 @@ MONTHS_GEN = [
     "января", "февраля", "марта", "апреля", "мая", "июня",
     "июля", "августа", "сентября", "октября", "ноября", "декабря",
 ]
+_ORDINALS = {
+    1: "первый", 2: "второй", 3: "третий", 4: "четвёртый", 5: "пятый",
+    6: "шестой", 7: "седьмой", 8: "восьмой", 9: "девятый", 10: "десятый",
+    -1: "последний", -2: "предпоследний", -3: "третий с конца",
+}
+_WDAY = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 
 
 def _now() -> datetime:
@@ -50,8 +60,122 @@ def event_line(ev) -> str:
     if ev.location:
         line += f" · <b>{esc(ev.location)}</b>"
     if ev.is_recurring:
-        line += " 🔁"
+        if getattr(ev, "series_count", 1) > 1:
+            span = _series_span(ev)
+            line += f" · 🔁 {esc(describe_rrule(ev.rrule))}{span}"
+        else:
+            line += " 🔁"
     return line
+
+
+def _series_span(ev) -> str:
+    """Диапазон вхождений серии в периоде → « (Пн 10 авг — Пн 2 ноя)»."""
+    if not ev.series_first or not ev.series_last:
+        return ""
+    d1 = ev.series_first.astimezone(config.TZ).date()
+    d2 = ev.series_last.astimezone(config.TZ).date()
+    if d1 == d2:
+        return ""
+    return f" ({fmt_date(d1)} — {fmt_date(d2)})"
+
+
+def _parse_byday(items) -> tuple[list[int], dict[int, int]]:
+    """BYDAY → (дни недели, {день: порядковый номер})."""
+    days: list[int] = []
+    ordinals: dict[int, int] = {}
+    for item in items:
+        s = item.to_ical().decode() if hasattr(item, "to_ical") else str(item)
+        m = re.fullmatch(r"(-?\d+)?(MO|TU|WE|TH|FR|SA|SU)", s)
+        if not m:
+            continue
+        n, code = m.groups()
+        if code not in _WDAY:
+            continue
+        if n:
+            ordinals[_WDAY[code]] = int(n)
+        else:
+            days.append(_WDAY[code])
+    return days, ordinals
+
+
+def describe_rrule(rrule: Optional[str]) -> str:
+    """RRULE → русское описание повтора («каждый Пн», «до 2 ноя»)."""
+    if not rrule:
+        return "повторяется"
+    try:
+        rr = vRecur.from_ical(rrule)
+    except Exception:
+        return f"повторяется ({rrule})"
+
+    def _first(key):
+        value = rr.get(key)
+        if isinstance(value, list):
+            return value[0] if value else None
+        return value
+
+    freq = (_first("FREQ") or "WEEKLY").upper()
+    parts: list[str] = []
+
+    def _join_days(days: list[int]) -> str:
+        names = [WEEKDAYS[d] for d in sorted(days)]
+        if len(names) == 1:
+            return names[0]
+        return " и ".join(names)
+
+    if freq == "DAILY":
+        parts.append("каждый день")
+    elif freq == "WEEKLY":
+        days, ordinals = _parse_byday(rr.get("BYDAY", []))
+        if days:
+            parts.append(f"каждый {_join_days(days)}")
+        else:
+            parts.append("каждую неделю")
+    elif freq == "MONTHLY":
+        days, ordinals = _parse_byday(rr.get("BYDAY", []))
+        if ordinals:
+            for d in sorted(ordinals):
+                name = _ORDINALS.get(ordinals[d], f"{ordinals[d]}-й")
+                parts.append(f"каждый {name} {WEEKDAYS[d]} месяца")
+        elif days:
+            parts.append(f"каждый {_join_days(days)} месяца")
+        else:
+            bymonthday = rr.get("BYMONTHDAY") or []
+            if bymonthday:
+                parts.append("каждое " + " и ".join(str(d) for d in bymonthday) + " числа месяца")
+            else:
+                parts.append("каждый месяц")
+    elif freq == "YEARLY":
+        parts.append("каждый год")
+    else:
+        parts.append("повторяется")
+
+    until = _first("UNTIL")
+    if until is not None:
+        if isinstance(until, datetime):
+            until = until.date()
+        parts.append(f"до {fmt_date(until)}")
+    count = _first("COUNT")
+    if count:
+        parts.append(f"{count} раз")
+    return ", ".join(parts)
+
+
+def describe_event(ev) -> str:
+    """Плоское описание события для LLM-каталога (без HTML/эмодзи)."""
+    s = ev.start.astimezone(config.TZ)
+    if ev.all_day:
+        when = f"{fmt_date(s.date())}, весь день"
+    else:
+        e = ev.end.astimezone(config.TZ)
+        when = f"{fmt_date(s.date())}, {s:%H:%M}–{e:%H:%M}"
+    parts = [f"{ev.summary}", when]
+    if ev.is_recurring:
+        parts.append(describe_rrule(ev.rrule))
+    if ev.location:
+        parts.append(ev.location)
+    if ev.description:
+        parts.append(ev.description)
+    return " · ".join(parts)
 
 
 def format_event_list(events, start: datetime, end: datetime) -> str:

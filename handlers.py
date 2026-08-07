@@ -15,7 +15,16 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 import config
-from caldav_service import CalDAVError, EventData, create_event, delete_event, exclude_occurrence, list_events, update_event
+from caldav_service import (
+    CalDAVError,
+    EventData,
+    collapse_events,
+    create_event,
+    delete_event,
+    exclude_occurrence,
+    list_events,
+    update_event,
+)
 from confirmation import (
     CandidateOp,
     CreateOp,
@@ -35,6 +44,7 @@ from confirmation import (
     register,
 )
 from formatting import (
+    describe_event,
     format_delete_confirm,
     format_delete_question,
     format_event_list,
@@ -44,7 +54,7 @@ from formatting import (
     fmt_dtime,
     _new_start,
 )
-from intent_parser import IntentParseError, parse_intent
+from intent_parser import IntentParseError, match_events, parse_intent
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -104,6 +114,25 @@ def _match(ev: EventData, query: str) -> bool:
     return q in ev.summary.lower() or q in ev.description.lower() or q in ev.location.lower()
 
 
+async def _match_query(events: list[EventData], query: str) -> list[EventData]:
+    """Свернуть серии и выбрать подходящие события.
+
+    Основной механизм — LLM: она видит свёрнутый каталог (серия = одна строка
+    с описанием повтора) и возвращает номера строк. При сбое LLM — локальный
+    фильтр по подстроке.
+    """
+    collapsed = collapse_events(events)
+    if not query:
+        return collapsed
+    catalog = "\n".join(f"{i}. {describe_event(ev)}" for i, ev in enumerate(collapsed, 1))
+    try:
+        indices = await asyncio.to_thread(match_events, query, catalog)
+    except IntentParseError:
+        logger.warning("LLM-матчинг не удался, использую локальный фильтр", exc_info=True)
+        return [ev for ev in collapsed if _match(ev, query)]
+    return [collapsed[i - 1] for i in indices]
+
+
 async def _safe_edit(message: Message, text: str, reply_markup=None) -> None:
     try:
         await message.edit_text(text, reply_markup=reply_markup)
@@ -138,7 +167,7 @@ async def _find_candidates(message: Message, intent: dict) -> Optional[list[Even
     except CalDAVError as exc:
         await message.answer(f"❌ Ошибка CalDAV: {esc(str(exc))}")
         return None
-    return [e for e in events if _match(e, query)]
+    return await _match_query(events, query)
 
 
 def _build_payload(intent: dict) -> Optional[dict]:
@@ -241,8 +270,7 @@ async def _list_flow(message: Message, intent: dict) -> None:
     except CalDAVError as exc:
         await message.answer(f"❌ Ошибка CalDAV: {esc(str(exc))}")
         return
-    if query:
-        events = [e for e in events if _match(e, query)]
+    events = await _match_query(events, query)
     if not events:
         if query:
             await message.answer(
