@@ -29,10 +29,9 @@ from icalendar import vRecur
 
 import config
 import caldav_service
-from caldav_service import collapse_events
 from confirmation import PlanAction
 from formatting import format_catalog_grouped
-from asks import AskQ, register_ask as register_ask_op
+from asks import AskQ, consume_ask as consume_ask_op, register_ask as register_ask_op
 
 logger = logging.getLogger(__name__)
 
@@ -123,9 +122,7 @@ def build_tools() -> list[dict]:
                         "options": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "minItems": 1,
-                            "maxItems": 4,
-                            "description": "варианты ответа (кнопки)",
+                            "description": "варианты ответа (кнопки), от 1 до 4",
                         },
                     },
                     "required": ["question", "options"],
@@ -188,12 +185,15 @@ SYSTEM_TEMPLATE = """Ты — ассистент, который управля�
 6. НЕ планируй удаление/изменение нескольких событий за один ход, если пользователь явно не просил \
 несколько («удали оба», «перенеси обе тренировки» и т.п.). Все изменения одного хода — ОДНИМ \
 вызовом reg_list со списком actions.
-7. Повторяющиеся события: одно вхождение — scope="instance", вся серия — scope="all". Если событие \
-повторяется, а пользователь не сказал явно «одно/это вхождение» или «всю серию/все» — обязательно \
-спроси через ask_user (question: «Перенести/удалить одно вхождение или всю серию?», options: \
-«Это вхождение», «Всю серию»), после ответа зарегистрируй план с выбранным scope. Пример: «перенеси \
-юайти на час позже» — сначала выбери/уточни событие (правило 4), затем спроси про scope, и только \
-потом reg_list. Можно задать оба вопроса в одном шаге двумя вызовами ask_user.
+7. Повторяющиеся события: в каталоге каждое вхождение серии показывается отдельным токеном [eN] со \
+своей датой и временем. scope="instance" — только выбранное вхождение (удалить/перенести именно эту \
+дату), scope="all" — вся серия целиком (можно взять любой токен серии). Если событие повторяется, а \
+пользователь не сказал явно «одно/это вхождение» или «всю серию/все» — обязательно спроси через \
+ask_user (question: «Перенести/удалить одно вхождение или всю серию?», options: «Это вхождение», \
+«Всю серию»), после ответа зарегистрируй план с выбранным scope и токеном нужного вхождения. Пример: \
+«перенеси юайти на час позже» — сначала выбери/уточни событие и нужную дату вхождения (правило 4), \
+затем спроси про scope, и только потом reg_list. Можно задать оба вопроса в одном шаге двумя вызовами \
+ask_user.
 8. Все изменения — только через reg_list. Никогда не пиши «сделано», «удалено», «создано» — до \
 подтверждения это лишь план.
 9. Создание (op="add"): summary и start обязательны (start — YYYY-MM-DDTHH:MM:SS в часовом поясе \
@@ -303,26 +303,33 @@ def _resolve_period(args: dict) -> tuple[datetime, datetime]:
 class CalendarAgent:
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._chat_locks: dict[int, threading.RLock] = {}
         self._sessions: dict[int, dict] = {}
         self._client = None
+
+    def _chat_lock(self, chat_id: int) -> threading.RLock:
+        with self._lock:
+            return self._chat_locks.setdefault(chat_id, threading.RLock())
 
     # ---------- сессии ----------
 
     def _prune(self) -> None:
         now = time.time()
         ttl = config.AGENT_SESSION_TTL_MIN * 60
-        for chat_id in list(self._sessions):
-            if now - self._sessions[chat_id]["ts"] > ttl:
-                del self._sessions[chat_id]
+        with self._lock:
+            for chat_id in list(self._sessions):
+                if now - self._sessions[chat_id]["ts"] > ttl:
+                    del self._sessions[chat_id]
 
     def _session(self, chat_id: int) -> dict:
         now = time.time()
-        sess = self._sessions.get(chat_id)
-        if sess is None or now - sess["ts"] > config.AGENT_SESSION_TTL_MIN * 60:
-            sess = {"messages": [], "refs": {}, "plan": [], "pending_asks": [], "ts": now}
-            self._sessions[chat_id] = sess
-        sess["ts"] = now
-        return sess
+        with self._lock:
+            sess = self._sessions.get(chat_id)
+            if sess is None or now - sess["ts"] > config.AGENT_SESSION_TTL_MIN * 60:
+                sess = {"messages": [], "refs": {}, "plan": [], "pending_asks": [], "ts": now}
+                self._sessions[chat_id] = sess
+            sess["ts"] = now
+            return sess
 
     def _append(self, chat_id: int, msg: dict) -> None:
         sess = self._session(chat_id)
@@ -333,12 +340,13 @@ class CalendarAgent:
         self._append(chat_id, {"role": "tool", "tool_call_id": tool_call_id, "content": content})
 
     def append_assistant_text(self, chat_id: int, text: str) -> None:
-        with self._lock:
+        with self._chat_lock(chat_id):
             self._append(chat_id, {"role": "assistant", "content": text})
 
     def has_pending_asks(self, chat_id: int) -> bool:
-        with self._lock:
-            sess = self._sessions.get(chat_id)
+        with self._chat_lock(chat_id):
+            with self._lock:
+                sess = self._sessions.get(chat_id)
             if not sess:
                 return False
             return any(not q["answered"] for q in sess["pending_asks"])
@@ -411,11 +419,13 @@ class CalendarAgent:
 
     def answer_ask(self, chat_id: int, ask_id: str, content: str) -> bool:
         """Ответ на вопрос кнопкой/текстом. True, если отвечены ВСЕ вопросы раунда."""
-        with self._lock:
+        with self._chat_lock(chat_id):
             sess = self._session(chat_id)
             found = False
             for q in sess["pending_asks"]:
                 if q["ask_id"] == ask_id:
+                    if q["answered"]:
+                        return all(q["answered"] for q in sess["pending_asks"])
                     self._append_tool_response(chat_id, q["tool_call_id"], content)
                     q["answered"] = True
                     found = True
@@ -440,6 +450,7 @@ class CalendarAgent:
                 final = (choice.content or "").strip()
                 logger.debug("AGENT chat=%s шаг=%d текст без инструментов: %r", chat_id, step + 1, final)
                 self._append(chat_id, {"role": "assistant", "content": final or "—"})
+                self._session(chat_id)["plan"] = []
                 return AgentResult(kind="error", text="Не удалось завершить ход — агент не вызвал done. Попробуйте ещё раз.")
 
             self._append(chat_id, self._to_assistant_msg(choice))
@@ -487,19 +498,21 @@ class CalendarAgent:
                 return AgentResult(kind="done", text=done_msg, items=done_items, plan=plan)
 
         logger.warning("AGENT chat=%s превышен лимит шагов %d", chat_id, config.AGENT_MAX_STEPS)
+        self._session(chat_id)["plan"] = []
         return AgentResult(
             kind="error",
             text="Не удалось обработать запрос за отведённое число шагов.",
         )
 
     def run(self, chat_id: int, user_text: str) -> AgentResult:
-        with self._lock:
+        with self._chat_lock(chat_id):
             self._prune()
             sess = self._session(chat_id)
             unanswered = [q for q in sess["pending_asks"] if not q["answered"]]
             if unanswered:
                 # Текст пользователя — ответ на первый неотвеченный вопрос.
                 q = unanswered[0]
+                consume_ask_op(q["ask_id"])
                 self._append_tool_response(chat_id, q["tool_call_id"], user_text)
                 q["answered"] = True
                 logger.debug("AGENT chat=%s текстовый ответ на %s", chat_id, q["ask_id"])
@@ -513,7 +526,7 @@ class CalendarAgent:
 
     def resume(self, chat_id: int) -> AgentResult:
         """Продолжить цикл после ответов на все вопросы раунда."""
-        with self._lock:
+        with self._chat_lock(chat_id):
             self._prune()
             sess = self._session(chat_id)
             if any(not q["answered"] for q in sess["pending_asks"]):
@@ -544,7 +557,7 @@ class CalendarAgent:
     def _tool_get_period(self, chat_id: int, args: dict) -> str:
         start, end = _resolve_period(args)
         try:
-            events = collapse_events(caldav_service.list_events(start, end))
+            events = caldav_service.list_events(start, end)
         except caldav_service.CalDAVError as exc:
             return f"Ошибка CalDAV: {exc}"
         if not events:
@@ -606,6 +619,23 @@ class CalendarAgent:
         for key in ("summary", "start", "location"):
             if key in changes and isinstance(changes[key], str):
                 changes[key] = changes[key].strip() or None
+        if changes.get("duration") is not None:
+            try:
+                changes["duration"] = int(changes["duration"])
+            except (TypeError, ValueError):
+                raise ValueError("некорректный duration (минуты)") from None
+            if changes["duration"] <= 0:
+                raise ValueError("некорректный duration (минуты)")
+        if changes.get("shift_minutes") is not None:
+            try:
+                changes["shift_minutes"] = int(changes["shift_minutes"])
+            except (TypeError, ValueError):
+                raise ValueError("некорректный shift_minutes (минуты)") from None
+        if changes.get("start"):
+            try:
+                _parse_dt(changes["start"])
+            except ValueError:
+                raise ValueError("некорректный start. Используй формат YYYY-MM-DDTHH:MM:SS") from None
         if not any(changes.get(k) for k in ("summary", "start", "shift_minutes", "duration", "location")):
             raise ValueError("не указано, что именно изменить.")
         scope = args.get("scope") or ("instance" if ev.is_recurring else "single")

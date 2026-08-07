@@ -60,8 +60,8 @@ INTRO = (
 _PENDING_PLANS: dict[int, str] = {}
 
 
-def _cancel_pending_plan(user_id: int) -> None:
-    op_id = _PENDING_PLANS.pop(user_id, None)
+def _cancel_pending_plan(chat_id: int) -> None:
+    op_id = _PENDING_PLANS.pop(chat_id, None)
     if op_id:
         consume(op_id)
 
@@ -116,7 +116,7 @@ async def on_message(message: Message) -> None:
     if not text or text.startswith("/"):
         return
     await message.bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
-    _cancel_pending_plan(message.from_user.id)
+    _cancel_pending_plan(message.chat.id)
     try:
         result = await asyncio.to_thread(run_agent, message.from_user.id, text)
     except AgentError as exc:
@@ -139,7 +139,7 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
     if result.plan:
         op = PlanOp(user_id=user_id, actions=result.plan)
         op_id = register(op)
-        _PENDING_PLANS[user_id] = op_id
+        _PENDING_PLANS[message.chat.id] = op_id
         content = format_done(result.text, result.items)
         content += "\n\n" + format_plan(result.plan)
         await message.answer(content, reply_markup=kb_plan_confirm(op_id))
@@ -204,14 +204,14 @@ async def on_callback(cb: CallbackQuery) -> None:
 
     if action == "cancel":
         consume(op_id)
-        _PENDING_PLANS.pop(cb.from_user.id, None)
+        _PENDING_PLANS.pop(cb.message.chat.id, None)
         await _safe_edit(cb.message, "❌ Отменено.")
         await cb.answer()
         return
 
     if action == "plan_confirm":
         op = consume(op_id)
-        _PENDING_PLANS.pop(cb.from_user.id, None)
+        _PENDING_PLANS.pop(cb.message.chat.id, None)
         if not isinstance(op, PlanOp):
             await cb.answer()
             return
@@ -233,7 +233,8 @@ def _perform_plan(op: PlanOp) -> list[str]:
     for action in op.actions:
         try:
             out.append(_perform_action(action))
-        except CalDAVError as exc:
+        except Exception as exc:
+            logger.exception("Ошибка выполнения действия плана")
             out.append(f"❌ Ошибка: {esc(str(exc))}")
     return out
 
@@ -271,9 +272,15 @@ def _run_update_action(action: PlanAction) -> str:
     ev = action.event
     changes = action.changes or {}
     if ev.is_recurring and action.scope == "instance":
-        exclude_occurrence(ev)
         payload = _build_updated_payload(ev, changes)
-        created = create_event(**payload)
+        create_event(**payload)
+        try:
+            exclude_occurrence(ev)
+        except CalDAVError:
+            return (
+                "⚠️ Создано новое событие «"
+                f"{esc(payload['summary'])}», но старое вхождение не удалось исключить из серии."
+            )
         return f"✅ Изменено: «{esc(payload['summary'])}» (вхождение вынесено в отдельное событие)"
     update_event(ev, changes)
     summary = changes.get("summary") or ev.summary

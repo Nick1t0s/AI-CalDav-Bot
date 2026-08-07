@@ -14,6 +14,7 @@ from uuid import uuid4
 import caldav
 import icalendar
 from icalendar import vRecur
+from icalendar.prop import vDDDLists
 import recurring_ical_events
 
 import config
@@ -53,6 +54,14 @@ class EventData:
 def _ensure_aware(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
+    return dt
+
+
+def _parse_dt(value: str) -> datetime:
+    """ISO-строка → aware datetime в часовом поясе пользователя."""
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=config.TZ)
     return dt
 
 
@@ -168,7 +177,11 @@ class CalDAVClient:
         self, vevent, master, is_recurring: bool, rrule: Optional[str] = None
     ) -> EventData:
         raw_start = vevent.decoded("DTSTART")
-        raw_end = vevent.decoded("DTEND")
+        try:
+            raw_end = vevent.decoded("DTEND")
+        except Exception:
+            duration = vevent.decoded("DURATION") if vevent.get("DURATION") is not None else timedelta(hours=1)
+            raw_end = raw_start + duration
         all_day = _is_all_day(raw_start)
         if all_day:
             start = datetime.combine(raw_start, time.min, tzinfo=config.TZ)
@@ -269,7 +282,15 @@ class CalDAVClient:
                     exdate_value = ev.instance_start.date()
                 else:
                     exdate_value = ev.instance_start.astimezone(UTC)
-                vevent.add("EXDATE", exdate_value)
+                existing = vevent.get("EXDATE")
+                values: list = []
+                if existing is not None:
+                    for prop in existing if isinstance(existing, list) else [existing]:
+                        values.extend(p.dt for p in prop.dts)
+                values.append(exdate_value)
+                if existing is not None:
+                    del vevent["EXDATE"]
+                vevent["EXDATE"] = vDDDLists(values)
                 target.data = cal.to_ical()
                 target.save()
         except CalDAVError:
@@ -293,7 +314,7 @@ class CalDAVClient:
 
                 new_start = old_start
                 if changes.get("start"):
-                    new_start = _ensure_aware(datetime.fromisoformat(changes["start"]))
+                    new_start = _parse_dt(changes["start"])
                 elif changes.get("shift_minutes"):
                     new_start = old_start + timedelta(minutes=int(changes["shift_minutes"]))
                 new_duration = (
@@ -342,51 +363,28 @@ class CalDAVClient:
             _replace_prop(vevent, "DTSTART", start_date)
             _replace_prop(vevent, "DTEND", start_date + new_duration)
             return
-        new_start_utc = _ensure_aware(new_start).astimezone(UTC)
-        _replace_prop(vevent, "DTSTART", new_start_utc)
-        _replace_prop(vevent, "DTEND", new_start_utc + new_duration)
+        new_start = _ensure_aware(new_start).astimezone(UTC)
+        _replace_prop(vevent, "DTSTART", new_start)
+        _replace_prop(vevent, "DTEND", new_start + new_duration)
 
 
 # ---------- модульный фасад ----------
 
 _client: Optional[CalDAVClient] = None
+_client_lock = threading.Lock()
 
 
 def get_client() -> CalDAVClient:
     global _client
     if _client is None:
-        _client = CalDAVClient()
+        with _client_lock:
+            if _client is None:
+                _client = CalDAVClient()
     return _client
 
 
 def list_events(start: datetime, end: datetime) -> list[EventData]:
     return get_client().list_events(start, end)
-
-
-def collapse_events(events: list[EventData]) -> list[EventData]:
-    """Свернуть повторяющиеся серии в одно событие с описанием повтора.
-
-    Серия идентифицируется по URL мастер-события; представитель — первое
-    вхождение в периоде. У представителя заполняются series_count и span.
-    """
-    groups: dict[str, list[EventData]] = {}
-    singles: list[EventData] = []
-    for ev in events:
-        if ev.is_recurring and ev.url:
-            groups.setdefault(ev.url, []).append(ev)
-        else:
-            singles.append(ev)
-    out: list[EventData] = []
-    for group in groups.values():
-        group.sort(key=lambda e: e.start)
-        rep = group[0]
-        rep.series_count = len(group)
-        rep.series_first = group[0].start
-        rep.series_last = group[-1].start
-        out.append(rep)
-    out.extend(singles)
-    out.sort(key=lambda e: (e.start, e.summary))
-    return out
 
 
 def create_event(

@@ -41,48 +41,14 @@ def fmt_dtime(dt: datetime) -> str:
     return fmt_date(dt.date())
 
 
-def format_period(start: datetime, end: datetime) -> str:
-    """Период [start, end) → человекочитаемая дата/диапазон."""
-    d1 = start.astimezone(config.TZ).date()
-    d2 = (end - timedelta(days=1)).astimezone(config.TZ).date()
-    if d1 == d2:
-        return fmt_date(d1)
-    return f"{fmt_date(d1)} — {fmt_date(d2)}"
-
-
-def event_line(ev) -> str:
-    s = ev.start.astimezone(config.TZ)
-    if ev.all_day:
-        line = f"📌 {esc(ev.summary)} <i>(весь день)</i>"
-    else:
-        e = ev.end.astimezone(config.TZ)
-        line = f"🕐 {s:%H:%M}–{e:%H:%M} {esc(ev.summary)}"
-    if ev.location:
-        line += f" · <b>{esc(ev.location)}</b>"
-    if ev.is_recurring:
-        if getattr(ev, "series_count", 1) > 1:
-            span = _series_span(ev)
-            line += f" · 🔁 {esc(describe_rrule(ev.rrule))}{span}"
-        else:
-            line += " 🔁"
-    return line
-
-
-def _series_span(ev) -> str:
-    """Диапазон вхождений серии в периоде → « (Пн 10 авг — Пн 2 ноя)»."""
-    if not ev.series_first or not ev.series_last:
-        return ""
-    d1 = ev.series_first.astimezone(config.TZ).date()
-    d2 = ev.series_last.astimezone(config.TZ).date()
-    if d1 == d2:
-        return ""
-    return f" ({fmt_date(d1)} — {fmt_date(d2)})"
-
-
 def _parse_byday(items) -> tuple[list[int], dict[int, int]]:
     """BYDAY → (дни недели, {день: порядковый номер})."""
     days: list[int] = []
     ordinals: dict[int, int] = {}
+    if items is None:
+        items = []
+    elif not isinstance(items, list):
+        items = [items]
     for item in items:
         s = item.to_ical().decode() if hasattr(item, "to_ical") else str(item)
         m = re.fullmatch(r"(-?\d+)?(MO|TU|WE|TH|FR|SA|SU)", s)
@@ -139,7 +105,10 @@ def describe_rrule(rrule: Optional[str]) -> str:
         elif days:
             parts.append(f"каждый {_join_days(days)} месяца")
         else:
-            bymonthday = rr.get("BYMONTHDAY") or []
+            bymonthday = rr.get("BYMONTHDAY")
+            if bymonthday is not None and not isinstance(bymonthday, list):
+                bymonthday = [bymonthday]
+            bymonthday = bymonthday or []
             if bymonthday:
                 parts.append("каждое " + " и ".join(str(d) for d in bymonthday) + " числа месяца")
             else:
@@ -265,33 +234,6 @@ def _plan_action_line(a) -> str:
     return "❓ Неизвестное действие"
 
 
-def format_event_list(events, start: datetime, end: datetime) -> str:
-    groups: dict[date, list] = {}
-    for ev in events:
-        day = ev.start.astimezone(config.TZ).date()
-        groups.setdefault(day, []).append(ev)
-    out: list[str] = []
-    for day in sorted(groups):
-        out.append(f"<b>📅 {fmt_date(day)}</b>")
-        for ev in groups[day]:
-            out.append(event_line(ev))
-        out.append("")
-    return "\n".join(out).rstrip()
-
-
-def format_delete_question(ev) -> str:
-    s = ev.start.astimezone(config.TZ)
-    when = "весь день" if ev.all_day else f"{s:%H:%M}"
-    return f"🗑 Удалить <b>«{esc(ev.summary)}»</b> ({fmt_dtime(s)}, {when})?"
-
-
-def format_delete_confirm(ev, delete_all: bool) -> str:
-    if delete_all:
-        return f"⚠️ Точно удалить <b>все повторения</b> «{esc(ev.summary)}»?"
-    when = "весь день" if ev.all_day else f"{ev.start:%H:%M}"
-    return f"⚠️ Точно удалить <b>«{esc(ev.summary)}»</b> ({fmt_dtime(ev.start)}, {when})?"
-
-
 def _new_start(ev, changes: dict) -> datetime:
     start_iso = changes.get("start")
     if start_iso:
@@ -303,60 +245,3 @@ def _new_start(ev, changes: dict) -> datetime:
     if shift:
         return ev.start + timedelta(minutes=int(shift))
     return ev.start
-
-
-def format_update_preview(ev, changes: dict, scope: str) -> str:
-    lines = ["<b>📝 Изменение события</b>", ""]
-    if ev.is_recurring:
-        target = "все вхождения" if scope == "all" else "только это вхождение"
-        lines.append(f"Применяется к: <b>{target}</b>")
-        lines.append("")
-    lines.append(f"• Текущее: <b>«{esc(ev.summary)}»</b>")
-    if ev.all_day:
-        lines.append(f"  {fmt_dtime(ev.start)} (весь день)")
-    else:
-        lines.append(f"  {fmt_dtime(ev.start)} в {ev.start:%H:%M}–{ev.end:%H:%M}")
-    if ev.location:
-        lines.append(f"  📍 {esc(ev.location)}")
-    lines.append("")
-    lines.append("🆕 Новые значения:")
-    has_change = False
-    if changes.get("summary") is not None:
-        lines.append(f"• Название → <b>«{esc(changes['summary'])}»</b>")
-        has_change = True
-    if changes.get("start") or changes.get("shift_minutes"):
-        new_start = _new_start(ev, changes)
-        lines.append(f"• Начало → <b>{new_start:%H:%M}</b>")
-        has_change = True
-    if changes.get("duration"):
-        new_start = _new_start(ev, changes)
-        new_end = new_start + timedelta(minutes=int(changes["duration"]))
-        lines.append(f"• Окончание → <b>{new_end:%H:%M}</b>")
-        has_change = True
-    loc = changes.get("location")
-    if loc is not None:
-        lines.append(f"• Место → <b>{esc(loc) if loc else '—'}</b>")
-        has_change = True
-    if not has_change:
-        return "\n".join(["<b>📝 Изменение события</b>", "", "Не указаны конкретные изменения."])
-    lines.append("")
-    lines.append("Применить?")
-    return "\n".join(lines)
-
-
-def format_new_event_preview(payload: dict) -> str:
-    start = payload["start"].astimezone(config.TZ)
-    end = start + payload["duration"]
-    lines = ["<b>✨ Новое событие</b>", ""]
-    lines.append(f"📌 Название: <b>«{esc(payload['summary'])}»</b>")
-    lines.append(f"📅 Дата: {fmt_date(start.date())}")
-    lines.append(f"🕐 Время: {start:%H:%M}–{end:%H:%M}")
-    if payload.get("rrule"):
-        lines.append(f"🔁 Повтор: {describe_rrule(payload['rrule'])}")
-    if payload.get("location"):
-        lines.append(f"📍 Место: {esc(payload['location'])}")
-    if payload.get("description"):
-        lines.append(f"📝 Описание: {esc(payload['description'])}")
-    lines.append("")
-    lines.append("Создать?")
-    return "\n".join(lines)
