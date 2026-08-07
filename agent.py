@@ -228,7 +228,6 @@ class CalendarAgent:
         self._sessions: dict[int, dict] = {}
         self._client = None
         self._plan: list[PlanAction] = []
-        self._refs: dict[str, object] = {}
 
     # ---------- сессии ----------
 
@@ -243,7 +242,7 @@ class CalendarAgent:
         now = time.time()
         sess = self._sessions.get(chat_id)
         if sess is None or now - sess["ts"] > config.AGENT_SESSION_TTL_MIN * 60:
-            sess = {"messages": [], "ts": now}
+            sess = {"messages": [], "refs": {}, "ts": now}
             self._sessions[chat_id] = sess
         sess["ts"] = now
         return sess
@@ -308,19 +307,26 @@ class CalendarAgent:
             self._prune()
             self._append(chat_id, {"role": "user", "content": user_text})
             self._plan = []
-            self._refs = {}
-            for _ in range(config.AGENT_MAX_STEPS):
+            logger.debug("AGENT chat=%s шаг=start user=%r", chat_id, user_text)
+            for step in range(config.AGENT_MAX_STEPS):
+                logger.debug("AGENT chat=%s шаг=%d вызов LLM (история=%d сообщений)", chat_id, step + 1, len(self._session(chat_id)["messages"]))
                 messages = [{"role": "system", "content": build_system_prompt()}] + self._session(chat_id)["messages"]
                 choice = self._ask(messages).choices[0].message
                 tool_calls = getattr(choice, "tool_calls", None)
                 if not tool_calls:
                     final = (choice.content or "").strip()
+                    logger.debug("AGENT chat=%s шаг=%d финальный ответ: %r", chat_id, step + 1, final)
+                    logger.debug("AGENT chat=%s шаг=%d план=%d действий", chat_id, step + 1, len(self._plan))
                     self._append(chat_id, {"role": "assistant", "content": final})
                     return AgentResult(text=final, plan=list(self._plan))
+                logger.debug("AGENT chat=%s шаг=%d tool_calls=%d", chat_id, step + 1, len(tool_calls))
                 self._append(chat_id, self._to_assistant_msg(choice))
                 for tc in tool_calls:
-                    result = self._call_tool(tc.function.name, tc.function.arguments)
+                    logger.debug("AGENT chat=%s шаг=%d tool=%s args=%s", chat_id, step + 1, tc.function.name, tc.function.arguments)
+                    result = self._call_tool(chat_id, tc.function.name, tc.function.arguments)
+                    logger.debug("AGENT chat=%s шаг=%d tool=%s result=%r", chat_id, step + 1, tc.function.name, result[:500])
                     self._append(chat_id, {"role": "tool", "tool_call_id": tc.id, "content": result})
+            logger.warning("AGENT chat=%s превышен лимит шагов %d", chat_id, config.AGENT_MAX_STEPS)
             self._append(chat_id, {"role": "assistant", "content": "(максимум шагов достигнут)"})
             return AgentResult(
                 text="Не удалось обработать запрос за отведённое число шагов.",
@@ -329,7 +335,7 @@ class CalendarAgent:
 
     # ---------- инструменты ----------
 
-    def _call_tool(self, name: str, arguments: str) -> str:
+    def _call_tool(self, chat_id: int, name: str, arguments: str) -> str:
         try:
             args = json.loads(arguments) if arguments else {}
             if not isinstance(args, dict):
@@ -338,19 +344,19 @@ class CalendarAgent:
             return "Ошибка: некорректные аргументы инструмента"
         try:
             if name == "list_events":
-                return self._tool_list_events(args)
+                return self._tool_list_events(chat_id, args)
             if name == "propose_create":
                 return self._tool_propose_create(args)
             if name == "propose_delete":
-                return self._tool_propose_delete(args)
+                return self._tool_propose_delete(chat_id, args)
             if name == "propose_update":
-                return self._tool_propose_update(args)
+                return self._tool_propose_update(chat_id, args)
             return f"Неизвестный инструмент: {name}"
         except Exception as exc:
             logger.exception("Инструмент %s упал", name)
             return f"Ошибка при выполнении {name}: {exc}"
 
-    def _tool_list_events(self, args: dict) -> str:
+    def _tool_list_events(self, chat_id: int, args: dict) -> str:
         start, end = _resolve_period(args)
         query = (args.get("query") or "").strip()
         try:
@@ -369,7 +375,7 @@ class CalendarAgent:
         if not events:
             return "Ничего не найдено в выбранном периоде."
         catalog, refs = format_catalog(events[: config.AGENT_CATALOG_LIMIT])
-        self._refs = refs
+        self._session(chat_id)["refs"] = refs
         if len(events) > config.AGENT_CATALOG_LIMIT:
             catalog += f"\n(показаны первые {config.AGENT_CATALOG_LIMIT} из {len(events)})"
         return catalog
@@ -400,11 +406,11 @@ class CalendarAgent:
         self._plan.append(PlanAction(kind="create", payload=payload))
         return f"Действие {len(self._plan)} запланировано: создать «{summary}». Дождись подтверждения."
 
-    def _tool_propose_delete(self, args: dict) -> str:
+    def _tool_propose_delete(self, chat_id: int, args: dict) -> str:
         ref = (args.get("ref") or "").strip()
-        ev = self._refs.get(ref)
+        ev = self._session(chat_id)["refs"].get(ref)
         if ev is None:
-            return f"Ошибка: неизвестный ref '{ref}'. Используй токены из list_events."
+            return f"Ошибка: неизвестный ref '{ref}'. Вызови list_events заново и используй свежие токены."
         scope = args.get("scope") or "instance"
         if scope not in ("instance", "all"):
             scope = "instance"
@@ -414,11 +420,11 @@ class CalendarAgent:
             f" (scope={scope}). Дождись подтверждения."
         )
 
-    def _tool_propose_update(self, args: dict) -> str:
+    def _tool_propose_update(self, chat_id: int, args: dict) -> str:
         ref = (args.get("ref") or "").strip()
-        ev = self._refs.get(ref)
+        ev = self._session(chat_id)["refs"].get(ref)
         if ev is None:
-            return f"Ошибка: неизвестный ref '{ref}'. Используй токены из list_events."
+            return f"Ошибка: неизвестный ref '{ref}'. Вызови list_events заново и используй свежие токены."
         changes = args.get("changes") or {}
         if not isinstance(changes, dict) or not changes:
             return "Ошибка: нужно заполнить changes."
