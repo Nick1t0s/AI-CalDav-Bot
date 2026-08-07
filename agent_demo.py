@@ -33,6 +33,10 @@ def main() -> None:
             continue
         print("--- ответ агента ---")
         print(result.text)
+        if result.items:
+            print("Детали:")
+            for item in result.items:
+                print(f"  • {item}")
         if result.plan:
             print(f"--- план ({len(result.plan)} действий) ---")
             for a in result.plan:

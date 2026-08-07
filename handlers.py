@@ -38,6 +38,7 @@ from formatting import (
     _new_start,
     describe_rrule,
     format_ask,
+    format_done,
     format_plan,
     fmt_dtime,
 )
@@ -139,13 +140,11 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
         op = PlanOp(user_id=user_id, actions=result.plan)
         op_id = register(op)
         _PENDING_PLANS[user_id] = op_id
-        content = ""
-        if result.text:
-            content = result.text + "\n\n"
-        content += format_plan(result.plan)
+        content = format_done(result.text, result.items)
+        content += "\n\n" + format_plan(result.plan)
         await message.answer(content, reply_markup=kb_plan_confirm(op_id))
     else:
-        await message.answer(result.text or "🤷 Не понял, что сделать.")
+        await message.answer(format_done(result.text or "🤷 Не понял, что сделать.", result.items))
 
 
 # ---------- callback ----------

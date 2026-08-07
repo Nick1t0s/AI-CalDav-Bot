@@ -137,14 +137,21 @@ def build_tools() -> list[dict]:
             "function": {
                 "name": "done",
                 "description": (
-                    "Завершить ход: message — финальный ответ пользователю, зарегистрированный "
+                    "Завершить ход: message — краткий финальный ответ пользователю, items — "
+                    "необязательный список коротких пунктов (например, найденные события), "
+                    "которые будут показаны аккуратным списком под ответом. Зарегистрированный "
                     "через reg_list план будет показан на подтверждение. Каждый ход должен "
                     "заканчиваться вызовом done либо ask_user."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "message": {"type": "string", "description": "финальный ответ пользователю"},
+                        "message": {"type": "string", "description": "краткий финальный ответ"},
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "короткие пункты списка (необязательно)",
+                        },
                     },
                     "required": ["message"],
                 },
@@ -195,7 +202,8 @@ location. При переносе (start / shift_minutes) сохраняй пр�
 11. ask_user: question — текст вопроса, options — 1–4 варианта ответа. Вызывай его отдельно, когда \
 нужно решение пользователя; после ответа продолжи и заверши done.
 12. Отвечай кратко по-русски, без markdown и эмодзи. Не упоминай в тексте пользователю токены ref \
-и технические детали инструментов.
+и технические детали инструментов. В done клади суть в message, а перечисление (например, события с \
+датой и временем) — отдельными короткими пунктами в items.
 """
 
 
@@ -207,6 +215,7 @@ class AgentError(Exception):
 class AgentResult:
     kind: str = "done"  # "done" | "ask" | "error"
     text: str = ""
+    items: list = field(default_factory=list)  # пункты списка под ответом done
     plan: list = field(default_factory=list)
     questions: list = field(default_factory=list)  # [{"ask_id", "question", "options"}]
 
@@ -224,6 +233,24 @@ def _parse_dt(value: str) -> datetime:
 
 def _day_start(dt: datetime) -> datetime:
     return datetime(dt.year, dt.month, dt.day, tzinfo=config.TZ)
+
+
+def _trim_history(msgs: list[dict], limit: Optional[int] = None) -> None:
+    """Обрезает историю спереди, не разрывая пару assistant(tool_calls) → tool.
+
+    Срез [-limit:] мог оставить tool-ответ без родительского сообщения с
+    tool_calls — провайдер отвечает 400 «tool must be a response to tool_calls».
+    Поэтому первым сохранённым сообщением не может быть tool: отступаем за него.
+    """
+    if limit is None:
+        limit = config.AGENT_HISTORY_LIMIT
+    overflow = len(msgs) - limit
+    if overflow <= 0:
+        return
+    cut = overflow
+    while cut < len(msgs) and msgs[cut].get("role") == "tool":
+        cut += 1
+    del msgs[:cut]
 
 
 def build_system_prompt() -> str:
@@ -294,9 +321,7 @@ class CalendarAgent:
     def _append(self, chat_id: int, msg: dict) -> None:
         sess = self._session(chat_id)
         sess["messages"].append(msg)
-        limit = config.AGENT_HISTORY_LIMIT
-        if len(sess["messages"]) > limit:
-            sess["messages"] = sess["messages"][-limit:]
+        _trim_history(sess["messages"])
 
     def _append_tool_response(self, chat_id: int, tool_call_id: str, content: str) -> None:
         self._append(chat_id, {"role": "tool", "tool_call_id": tool_call_id, "content": content})
@@ -415,6 +440,7 @@ class CalendarAgent:
             logger.debug("AGENT chat=%s шаг=%d tool_calls=%d", chat_id, step + 1, len(tool_calls))
             asked = False
             done_msg = None
+            done_items: list[str] = []
             for tc in tool_calls:
                 name = tc.function.name
                 logger.debug("AGENT chat=%s шаг=%d tool=%s args=%s", chat_id, step + 1, name, tc.function.arguments)
@@ -428,6 +454,7 @@ class CalendarAgent:
                     except json.JSONDecodeError:
                         args = {}
                     done_msg = (args.get("message") or "Готово.").strip()
+                    done_items = [str(i).strip() for i in (args.get("items") or []) if str(i).strip()]
                     self._append_tool_response(chat_id, tc.id, "Принято.")
                     continue
                 result = self._call_tool(chat_id, name, tc.function.arguments)
@@ -451,7 +478,7 @@ class CalendarAgent:
                 sess["plan"] = []
                 self._append(chat_id, {"role": "assistant", "content": done_msg})
                 logger.debug("AGENT chat=%s шаг=%d done: план=%d действий", chat_id, step + 1, len(plan))
-                return AgentResult(kind="done", text=done_msg, plan=plan)
+                return AgentResult(kind="done", text=done_msg, items=done_items, plan=plan)
 
         logger.warning("AGENT chat=%s превышен лимит шагов %d", chat_id, config.AGENT_MAX_STEPS)
         return AgentResult(

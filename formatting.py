@@ -206,6 +206,15 @@ def format_ask(question: str) -> str:
     return f"❓ {esc(question)}"
 
 
+def format_done(message: str, items: list[str]) -> str:
+    """Финальный ответ done: сообщение + аккуратный список пунктов (HTML)."""
+    out = [esc(message)]
+    if items:
+        out.extend(["", "<b>📋 Детали</b>", ""])
+        out.extend(f"• {esc(item)}" for item in items)
+    return "\n".join(out)
+
+
 def format_plan(actions) -> str:
     """Человекочитаемый список запланированных действий (для кнопки подтверждения)."""
     if not actions:
