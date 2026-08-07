@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 
-from agent import AgentError, run_agent
+from agent import AgentError, answer_ask, resume_agent, run_agent
 
 
 def main() -> None:
@@ -24,8 +24,12 @@ def main() -> None:
         chat_id += 1
         try:
             result = run_agent(chat_id, phrase)
+            result = _resolve_asks(chat_id, result)
         except AgentError as exc:
             print(f"😕 Ошибка агента: {exc}")
+            continue
+        if result.kind == "error":
+            print(f"😕 {result.text}")
             continue
         print("--- ответ агента ---")
         print(result.text)
@@ -35,6 +39,25 @@ def main() -> None:
                 print(f"  {a.kind} | scope={a.scope} | event={getattr(a.event, 'summary', None) if a.event else None} | payload={a.payload}")
         else:
             print("(план пуст)")
+
+
+def _resolve_asks(chat_id: int, result) -> object:
+    """Отвечаем на вопросы агента в цикле, пока не получим done/error."""
+    while result.kind == "ask":
+        for q in result.questions:
+            print(f"❓ {q['question']}")
+            for i, option in enumerate(q["options"], 1):
+                print(f"  {i}. {option}")
+            try:
+                answer = input("Ответ (номер или текст): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                raise SystemExit(0)
+            if answer.isdigit() and 1 <= int(answer) <= len(q["options"]):
+                answer = q["options"][int(answer) - 1]
+            answer_ask(chat_id, q["ask_id"], answer)
+        result = resume_agent(chat_id)
+    return result
 
 
 if __name__ == "__main__":

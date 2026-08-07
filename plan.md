@@ -23,10 +23,11 @@ AI-CalDav-Bot/
 ├── config.py            # чтение .env: токен, caldav creds, ALLOWED_USER_IDS, TZ, AGENT_*
 ├── main.py              # запуск aiogram
 ├── handlers.py          # обработчики сообщений + подтверждение плана кнопкой
-├── agent.py             # агент: tools, чат-цикл, сессии
+├── agent.py             # агент: tools (get_period/reg_list/ask_user/done), чат-цикл, сессии
 ├── caldav_service.py    # CRUD через caldav/icalendar
 ├── confirmation.py      # PlanOp + клавиатура подтверждения
-├── formatting.py        # каталог для модели (format_catalog) и план для пользователя (format_plan)
+├── asks.py              # реестр вопросов ask_user + кнопки вариантов
+├── formatting.py        # каталог для модели (format_catalog_grouped) и план для пользователя (format_plan)
 ├── agent_demo.py        # CLI-проверка агента без Telegram
 └── check_connection.py  # CLI-проверка доступа к Яндексу (до запуска бота)
 ```
@@ -41,11 +42,14 @@ AI-CalDav-Bot/
 2. `agent.run(chat_id, text)` — чат-цикл с моделью (история на chat_id, TTL).
    В системный промпт подаются текущие дата/время/TZ.
 3. Tools:
-   - `list_events(date_from?, date_to?, query?)` — read-only, исполняется сразу;
-     возвращает каталог с токенами `[eN]` (серии свёрнуты в ближайшее вхождение).
-   - `propose_create / propose_delete / propose_update` — staged, кладутся в план.
-4. Цикл идёт, пока модель не вернёт финальный текст (без tool_calls) либо не исчерпает
-   `AGENT_MAX_STEPS`. Все накопленные действия = план.
+   - `get_period(date_from?, date_to?)` — read-only, исполняется сразу;
+     все события периода по дням, каталог с токенами `[eN]` (серии свёрнуты в ближайшее вхождение).
+   - `reg_list(actions)` — staged: одним вызовом регистрирует список действий (add/delete/update) в план.
+   - `ask_user(question, options)` — пауза: вопрос уходит в чат с кнопками вариантов; ответ возвращается
+     модели как результат инструмента; при нескольких вопросах ждём ответы на все.
+   - `done(message)` — завершение хода: финальный текст + накопленный план.
+4. Ход модели обязан закончиться `done` либо `ask_user`; текст без инструментов и лимит шагов
+   без `done` = ошибка, план отбрасывается. План живёт в сессии и переживает паузы на `ask_user`.
 5. План показывается списком + кнопка `✅ Выполнить всё / ❌ Отмена`.
 6. Подтверждение → скрипт исполняет действия через `caldav_service` (EXDATE для вхождений и т.п.),
    результат дописывается в историю агента.

@@ -16,7 +16,8 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 import config
-from agent import AgentError, append_assistant_text, run_agent
+from agent import AgentError, answer_ask, append_assistant_text, resume_agent, run_agent
+from asks import cleanup_expired as cleanup_asks, consume_ask, get_ask, kb_ask
 from caldav_service import (
     CalDAVError,
     create_event,
@@ -36,6 +37,7 @@ from confirmation import (
 from formatting import (
     _new_start,
     describe_rrule,
+    format_ask,
     format_plan,
     fmt_dtime,
 )
@@ -108,6 +110,7 @@ async def on_message(message: Message) -> None:
     if not await _check_allowed(message):
         return
     cleanup_expired()
+    cleanup_asks()
     text = message.text.strip()
     if not text or text.startswith("/"):
         return
@@ -118,10 +121,24 @@ async def on_message(message: Message) -> None:
     except AgentError as exc:
         await message.answer(f"😕 Ошибка агента: {esc(str(exc))}")
         return
+    await _handle_result(message, result)
+
+
+async def _handle_result(message: Message, result, user_id: int = None) -> None:
+    """Показ результата агента: вопросы (ask) / ошибка / финальный ответ + план."""
+    if user_id is None:
+        user_id = message.from_user.id if message.from_user else 0
+    if result.kind == "error":
+        await message.answer(f"😕 {esc(result.text)}")
+        return
+    if result.kind == "ask":
+        for q in result.questions:
+            await message.answer(format_ask(q["question"]), reply_markup=kb_ask(q["ask_id"], q["options"]))
+        return
     if result.plan:
-        op = PlanOp(user_id=message.from_user.id, actions=result.plan)
+        op = PlanOp(user_id=user_id, actions=result.plan)
         op_id = register(op)
-        _PENDING_PLANS[message.from_user.id] = op_id
+        _PENDING_PLANS[user_id] = op_id
         content = ""
         if result.text:
             content = result.text + "\n\n"
@@ -132,6 +149,42 @@ async def on_message(message: Message) -> None:
 
 
 # ---------- callback ----------
+
+
+@router.callback_query(F.data.startswith("ask:"))
+async def on_ask_callback(cb: CallbackQuery) -> None:
+    cleanup_asks()
+    parts = cb.data.split(":")
+    if len(parts) < 3:
+        await cb.answer()
+        return
+    ask_id, idx = parts[1], parts[2]
+    ask = get_ask(ask_id)
+    if ask is None:
+        await cb.answer("Вопрос устарел, попробуйте ещё раз.", show_alert=True)
+        return
+    if cb.from_user.id != ask.user_id:
+        await cb.answer("Это не ваш вопрос.", show_alert=True)
+        return
+    try:
+        option = ask.options[int(idx)]
+    except (ValueError, IndexError):
+        await cb.answer()
+        return
+    consume_ask(ask_id)
+    all_done = await asyncio.to_thread(answer_ask, cb.from_user.id, ask_id, option)
+    await _safe_edit(cb.message, f"{format_ask(ask.question)}\n✓ {esc(option)}")
+    if not all_done:
+        await cb.answer("Осталось ответить на другие вопросы.")
+        return
+    try:
+        result = await asyncio.to_thread(resume_agent, cb.from_user.id)
+    except AgentError as exc:
+        await _safe_edit(cb.message, f"😕 Ошибка агента: {esc(str(exc))}")
+        await cb.answer()
+        return
+    await _handle_result(cb.message, result, user_id=cb.from_user.id)
+    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("op:"))

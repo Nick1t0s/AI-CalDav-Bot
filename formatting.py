@@ -178,18 +178,32 @@ def describe_event(ev) -> str:
     return " · ".join(parts)
 
 
-def format_catalog(events) -> tuple[str, dict]:
-    """Нумерованный каталог событий для агента: «[eN] описание».
+def format_catalog_grouped(events) -> tuple[str, dict]:
+    """Каталог событий для агента, сгруппированный по дням: «Пн, 10 августа: [eN] …».
 
-    Возвращает (текст, {ref: event}) для ссылок из propose_delete/update.
+    Возвращает (текст, {ref: event}) для ссылок из reg_list. Токены [eN]
+    уникальны в пределах всего периода.
     """
+    groups: dict[date, list] = {}
+    for ev in events:
+        day = ev.start.astimezone(config.TZ).date()
+        groups.setdefault(day, []).append(ev)
     refs: dict[str, object] = {}
     lines: list[str] = []
-    for i, ev in enumerate(events, 1):
-        ref = f"e{i}"
-        refs[ref] = ev
-        lines.append(f"[{ref}] {describe_event(ev)}")
+    idx = 1
+    for day in sorted(groups):
+        lines.append(f"{fmt_date(day)}:")
+        for ev in groups[day]:
+            ref = f"e{idx}"
+            idx += 1
+            refs[ref] = ev
+            lines.append(f"  [{ref}] {describe_event(ev)}")
     return "\n".join(lines), refs
+
+
+def format_ask(question: str) -> str:
+    """Текст вопроса ask_user (HTML для Telegram)."""
+    return f"❓ {esc(question)}"
 
 
 def format_plan(actions) -> str:
