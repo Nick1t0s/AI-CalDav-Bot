@@ -178,6 +178,70 @@ def describe_event(ev) -> str:
     return " · ".join(parts)
 
 
+def format_catalog(events) -> tuple[str, dict]:
+    """Нумерованный каталог событий для агента: «[eN] описание».
+
+    Возвращает (текст, {ref: event}) для ссылок из propose_delete/update.
+    """
+    refs: dict[str, object] = {}
+    lines: list[str] = []
+    for i, ev in enumerate(events, 1):
+        ref = f"e{i}"
+        refs[ref] = ev
+        lines.append(f"[{ref}] {describe_event(ev)}")
+    return "\n".join(lines), refs
+
+
+def format_plan(actions) -> str:
+    """Человекочитаемый список запланированных действий (для кнопки подтверждения)."""
+    if not actions:
+        return ""
+    lines = ["<b>📋 План действий</b>", ""]
+    for i, a in enumerate(actions, 1):
+        lines.append(f"{i}. {_plan_action_line(a)}")
+    lines.append("")
+    lines.append("Выполнить?")
+    return "\n".join(lines)
+
+
+def _plan_action_line(a) -> str:
+    if a.kind == "create":
+        p = a.payload
+        start = p["start"].astimezone(config.TZ)
+        end = start + p["duration"]
+        line = f"✨ Создать <b>«{esc(p['summary'])}»</b> — {fmt_date(start.date())}, {start:%H:%M}–{end:%H:%M}"
+        if p.get("rrule"):
+            line += f" · 🔁 {describe_rrule(p['rrule'])}"
+        if p.get("location"):
+            line += f" · 📍 {esc(p['location'])}"
+        return line
+
+    ev = a.event
+    if a.kind == "delete":
+        if a.scope == "all" and ev.is_recurring:
+            return f"🗑 Удалить <b>все повторения</b> «{esc(ev.summary)}»"
+        when = "весь день" if ev.all_day else f"{ev.start:%H:%M}"
+        return f"🗑 Удалить «{esc(ev.summary)}» ({fmt_dtime(ev.start)}, {when})"
+
+    if a.kind == "update":
+        changes = a.changes or {}
+        bits: list[str] = []
+        if changes.get("summary") is not None:
+            bits.append(f"название → «{esc(changes['summary'])}»")
+        if changes.get("start") or changes.get("shift_minutes"):
+            ns = _new_start(ev, changes)
+            bits.append(f"начало → {ns:%H:%M}")
+        if changes.get("duration"):
+            bits.append(f"длительность → {int(changes['duration'])} мин")
+        if changes.get("location") is not None:
+            loc = esc(changes["location"]) if changes["location"] else "—"
+            bits.append(f"место → {loc}")
+        target = "все вхождения" if a.scope == "all" else "это вхождение" if a.scope == "instance" else "событие"
+        return f"📝 Изменить «{esc(ev.summary)}» ({target}): {', '.join(bits)}"
+
+    return "❓ Неизвестное действие"
+
+
 def format_event_list(events, start: datetime, end: datetime) -> str:
     groups: dict[date, list] = {}
     for ev in events:

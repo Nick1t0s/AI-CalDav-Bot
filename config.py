@@ -30,3 +30,9 @@ REQUESTS_TIMEOUT_SECONDS: int = int(os.getenv("REQUESTS_TIMEOUT_SECONDS", "60"))
 
 # Окно поиска (дней вперёд) для запросов «когда <событие>» / «что у меня есть» без явной даты.
 LIST_DEFAULT_DAYS: int = int(os.getenv("LIST_DEFAULT_DAYS", "90"))
+
+# Агент (function calling): лимиты цикла и сессий.
+AGENT_MAX_STEPS: int = int(os.getenv("AGENT_MAX_STEPS", "8"))
+AGENT_SESSION_TTL_MIN: int = int(os.getenv("AGENT_SESSION_TTL_MIN", "30"))
+AGENT_HISTORY_LIMIT: int = int(os.getenv("AGENT_HISTORY_LIMIT", "30"))
+AGENT_CATALOG_LIMIT: int = int(os.getenv("AGENT_CATALOG_LIMIT", "50"))
