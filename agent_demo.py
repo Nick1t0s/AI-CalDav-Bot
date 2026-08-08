@@ -5,12 +5,25 @@
 """
 from __future__ import annotations
 
+import logging
 import sys
 
+import config
 from agent import AgentError, answer_ask, resume_agent, run_agent
 
 
+def _setup_logging() -> None:
+    logging.basicConfig(
+        level=getattr(logging, config.LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    if config.LOG_LEVEL == "DEBUG":
+        for noisy in ("openai", "httpcore", "httpx", "urllib3", "asyncio"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
 def main() -> None:
+    _setup_logging()
     chat_id = 9000
     print("Агент CalDAV. Пустая строка — выход. Ctrl+C — завершить.")
     while True:

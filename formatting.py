@@ -147,27 +147,76 @@ def describe_event(ev) -> str:
     return " · ".join(parts)
 
 
-def format_catalog_grouped(events) -> tuple[str, dict]:
-    """Каталог событий для агента, сгруппированный по дням: «Пн, 10 августа: [eN] …».
+def format_catalog_compact(events, start=None, end=None, oneoff_limit: Optional[int] = None) -> tuple[str, dict]:
+    """Компактный каталог для LLM: серии одной строкой, одиночные — по дням.
 
-    Возвращает (текст, {ref: event}) для ссылок из reg_list. Токены [eN]
-    уникальны в пределах всего периода.
+    Серия рендерится один раз: «[eN] Название · 16:00–17:00 · каждый Пн · кроме …».
+    Возвращает (текст, {ref: event|list[event]}): серия → список вхождений периода,
+    одиночное → EventData. Токены [eN] уникальны в пределах всего периода.
     """
-    groups: dict[date, list] = {}
+    period_start = start.astimezone(config.TZ).date() if start is not None else None
+    period_end = end.astimezone(config.TZ).date() if end is not None else None
+
+    series: dict[str, list] = {}
+    oneoffs: list = []
     for ev in events:
-        day = ev.start.astimezone(config.TZ).date()
-        groups.setdefault(day, []).append(ev)
+        if ev.is_recurring:
+            series.setdefault(ev.url, []).append(ev)
+        else:
+            oneoffs.append(ev)
+    for insts in series.values():
+        insts.sort(key=lambda e: (e.start, e.summary))
+
     refs: dict[str, object] = {}
     lines: list[str] = []
     idx = 1
-    for day in sorted(groups):
-        lines.append(f"{fmt_date(day)}:")
-        for ev in groups[day]:
+
+    if series:
+        lines.append("Серии:")
+        for url in sorted(series, key=lambda u: series[u][0].start):
+            insts = series[url]
+            rep = insts[0]
             ref = f"e{idx}"
             idx += 1
-            refs[ref] = ev
-            lines.append(f"  [{ref}] {describe_event(ev)}")
-    return "\n".join(lines), refs
+            refs[ref] = insts
+            when = "весь день" if rep.all_day else f"{rep.start:%H:%M}–{rep.end:%H:%M}"
+            line = f"  [{ref}] {rep.summary} · {when}"
+            rec = describe_rrule(rep.rrule) if rep.rrule else ""
+            if rec:
+                line += f" · {rec}"
+            excluded = sorted(rep.exdates)
+            if period_start is not None and period_end is not None:
+                excluded = [d for d in excluded if period_start <= d < period_end]
+            if excluded:
+                line += " · кроме " + ", ".join(fmt_date(d) for d in excluded)
+            lines.append(line)
+        lines.append("")
+
+    if oneoffs:
+        lines.append("Одиночные события:")
+        groups: dict[date, list] = {}
+        for ev in oneoffs:
+            day = ev.start.astimezone(config.TZ).date()
+            groups.setdefault(day, []).append(ev)
+        total = len(oneoffs)
+        shown = 0
+        for day in sorted(groups):
+            day_events = sorted(groups[day], key=lambda e: (e.start, e.summary))
+            if oneoff_limit is not None and shown >= oneoff_limit:
+                break
+            lines.append(f"{fmt_date(day)}:")
+            for ev in day_events:
+                if oneoff_limit is not None and shown >= oneoff_limit:
+                    break
+                ref = f"e{idx}"
+                idx += 1
+                refs[ref] = ev
+                lines.append(f"  [{ref}] {describe_event(ev)}")
+                shown += 1
+        if oneoff_limit is not None and shown < total:
+            lines.append(f"  (показаны первые {shown} одиночных из {total})")
+
+    return "\n".join(lines).strip(), refs
 
 
 def format_ask(question: str) -> str:

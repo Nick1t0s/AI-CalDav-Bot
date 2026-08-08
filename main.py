@@ -14,7 +14,13 @@ from handlers import router
 
 
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, config.LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    if config.LOG_LEVEL == "DEBUG":
+        for noisy in ("openai", "httpcore", "httpx", "urllib3", "asyncio"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
     if not config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN не задан в .env")
     if not config.ALLOWED_USER_IDS:

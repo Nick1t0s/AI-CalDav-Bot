@@ -29,8 +29,9 @@ from icalendar import vRecur
 
 import config
 import caldav_service
+from caldav_service import EventData
 from confirmation import PlanAction
-from formatting import format_catalog_grouped
+from formatting import format_catalog_compact
 from asks import AskQ, consume_ask as consume_ask_op, register_ask as register_ask_op
 
 logger = logging.getLogger(__name__)
@@ -43,9 +44,9 @@ def build_tools() -> list[dict]:
             "function": {
                 "name": "get_period",
                 "description": (
-                    "Все события за период, сгруппированы по дням. Без дат — следующие "
-                    f"{config.LIST_DEFAULT_DAYS} дней. Возвращает пронумерованный список "
-                    "с токенами [eN], которые нужны для reg_list."
+                    "Все события за период: серии свёрнуты одной строкой (каждый Пн, время, "
+                    f"кроме …), одиночные — по дням. Без дат — следующие {config.LIST_DEFAULT_DAYS} "
+                    "дней. Возвращает пронумерованный список с токенами [eN], которые нужны для reg_list."
                 ),
                 "parameters": {
                     "type": "object",
@@ -72,9 +73,11 @@ def build_tools() -> list[dict]:
                             "type": "array",
                             "description": (
                                 "add: summary + start (YYYY-MM-DDTHH:MM:SS), duration в минутах (по умолчанию 60), "
-                                "location, description, rrule. delete: ref (токен [eN]) + scope (instance|all). "
-                                "update: ref + scope (instance|all) + changes {summary, start, shift_minutes, "
-                                "duration, location}."
+                                "location, description, rrule. delete: ref (токен eN из каталога, со скобками [eN] тоже "
+                                "принимается) + scope (instance|all), "
+                                "date (YYYY-MM-DD) — для серии при scope='instance'. "
+                                "update: ref + scope (instance|all) + date (аналогично) + changes {summary, start, "
+                                "shift_minutes, duration, location}."
                             ),
                             "items": {
                                 "type": "object",
@@ -88,6 +91,7 @@ def build_tools() -> list[dict]:
                                     "rrule": {"type": "string"},
                                     "ref": {"type": "string"},
                                     "scope": {"type": "string", "enum": ["instance", "all"]},
+                                    "date": {"type": "string", "description": "YYYY-MM-DD, конкретная дата вхождения серии (только для scope='instance')"},
                                     "changes": {
                                         "type": "object",
                                         "properties": {
@@ -180,20 +184,26 @@ SYSTEM_TEMPLATE = """Ты — ассистент, который управля�
 когда несколько событий одинаково подходят и пользователь не назвал событие точно; в options \
 перечисляй совпавшие события кратко (название и дата). Пример: «юайти алгоритмы» — однозначно \
 «Юайти алгоритмы», не спрашивай; просто «юайти» — подходят оба, задай вопрос.
-5. Одноразовое событие и повторяющаяся серия с одинаковым названием — это РАЗНЫЕ события. \
+5. Одноразовое событие и повторяющаяся серия с одинаковым названием — это РАЗНЫЕ события \
+(серии показаны в блоке «Серии» одной строкой, одиночные — в «Одиночные события»). \
 «Все повторения / всю серию» — только про серию (scope="all"), не трогая одноразовые события.
 6. НЕ планируй удаление/изменение нескольких событий за один ход, если пользователь явно не просил \
 несколько («удали оба», «перенеси обе тренировки» и т.п.). Все изменения одного хода — ОДНИМ \
-вызовом reg_list со списком actions.
-7. Повторяющиеся события: в каталоге каждое вхождение серии показывается отдельным токеном [eN] со \
-своей датой и временем. scope="instance" — только выбранное вхождение (удалить/перенести именно эту \
-дату), scope="all" — вся серия целиком (можно взять любой токен серии). Если событие повторяется, а \
+вызовом reg_list со списком actions. План накапливается и переживает паузу на ask_user: уже \
+зарегистрированные действия повторно НЕ регистрируй (в истории уже есть ответ «План зарегистрирован») \
+— после ответа пользователя просто заверши ход вызовом done.
+7. Повторяющиеся события: серия показана в каталоге ОДНИМ токеном [eN] с описанием «каждый Пн, \
+время, кроме …». scope="instance" — только одно вхождение серии (удалить/перенести именно эту дату): \
+тогда обязательно передай date (YYYY-MM-DD) конкретного вхождения — возьми её из запроса пользователя \
+или вычисли по правилу («следующий понедельник» и т.п.), с учётом исключений «кроме …». \
+scope="all" — вся серия целиком (просто токен серии, без date). Если событие повторяется, а \
 пользователь не сказал явно «одно/это вхождение» или «всю серию/все» — обязательно спроси через \
 ask_user (question: «Перенести/удалить одно вхождение или всю серию?», options: «Это вхождение», \
-«Всю серию»), после ответа зарегистрируй план с выбранным scope и токеном нужного вхождения. Пример: \
-«перенеси юайти на час позже» — сначала выбери/уточни событие и нужную дату вхождения (правило 4), \
-затем спроси про scope, и только потом reg_list. Можно задать оба вопроса в одном шаге двумя вызовами \
-ask_user.
+«Всю серию»). Для «Это вхождение» уточни дату: если пользователь её не назвал — ask_user с вариантами \
+датами вхождений (для серии это даты «каждый Пн», кроме исключений). После ответов зарегистрируй \
+план с выбранным scope, date (для instance) и токеном серии. Пример: «перенеси юайти на час позже» — \
+сначала выбери/уточни событие и дату вхождения (правило 4), затем спроси про scope и дату, и только \
+потом reg_list. Можно задать оба вопроса в одном шаге двумя вызовами ask_user.
 8. Все изменения — только через reg_list. Никогда не пиши «сделано», «удалено», «создано» — до \
 подтверждения это лишь план.
 9. Создание (op="add"): summary и start обязательны (start — YYYY-MM-DDTHH:MM:SS в часовом поясе \
@@ -205,8 +215,12 @@ FREQ=WEEKLY;BYDAY=MO, «по будням» → FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
 10. Изменение (op="update"): правки клади в changes: summary / start / shift_minutes / duration / \
 location. При переносе (start / shift_minutes) сохраняй прежнюю длительность события — duration \
 меняй, только если пользователь явно просил («сделай 30 минут»).
-11. ask_user: question — текст вопроса, options — 1–4 варианта ответа. Вызывай его отдельно, когда \
-нужно решение пользователя; после ответа продолжи и заверши done.
+11. ask_user: question — текст вопроса, options — 1–4 варианта ответа. Спрашивай ТОЛЬКО когда \
+запрос неоднозначен или не хватает данных, чтобы выполнить его (какое событие, какая дата, одно \
+вхождение или вся серия). Никогда не переспрашивай подтверждение явного указания пользователя \
+(«Вы уверены?», «Точно удалить?» и т.п.) — прямое указание уже является решением: сразу \
+зарегистрируй план через reg_list и заверши ход done. После ответа пользователя продолжи и \
+заверши done.
 12. Отвечай кратко по-русски, без markdown и эмодзи. Не упоминай в тексте пользователю токены ref \
 и технические детали инструментов. В done клади суть в message, а перечисление (например, события с \
 датой и временем) — отдельными короткими пунктами в items.
@@ -365,13 +379,29 @@ class CalendarAgent:
                 timeout=config.REQUESTS_TIMEOUT_SECONDS,
             )
         try:
-            return self._client.chat.completions.create(
-                model=config.OPENAI_MODEL,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                temperature=0,
-            )
+            logger.debug("AGENT → LLM messages:\n%s", json.dumps(messages, ensure_ascii=False, indent=2))
+            request_kwargs: dict = {
+                "model": config.OPENAI_MODEL,
+                "messages": messages,
+                "tools": TOOLS,
+                "tool_choice": "auto",
+                "temperature": 0,
+            }
+            if config.OPENAI_THINKING == "disabled":
+                request_kwargs["extra_body"] = {
+                    "reasoning": {"enabled": False},
+                    "thinking": {"type": "disabled"},
+                }
+            response = self._client.chat.completions.create(**request_kwargs)
+            if logger.isEnabledFor(logging.DEBUG):
+                for choice in response.choices:
+                    logger.debug(
+                        "AGENT ← LLM: content=%r reasoning=%r tool_calls=%s",
+                        choice.message.content,
+                        getattr(choice.message, "reasoning_content", None),
+                        [tc.function.name for tc in (choice.message.tool_calls or [])],
+                    )
+            return response
         except Exception as exc:
             raise AgentError(f"ошибка LLM: {exc}") from exc
 
@@ -562,10 +592,10 @@ class CalendarAgent:
             return f"Ошибка CalDAV: {exc}"
         if not events:
             return "Ничего не найдено в выбранном периоде."
-        catalog, refs = format_catalog_grouped(events[: config.AGENT_CATALOG_LIMIT])
+        catalog, refs = format_catalog_compact(
+            events, start=start, end=end, oneoff_limit=config.AGENT_CATALOG_LIMIT
+        )
         self._session(chat_id)["refs"] = refs
-        if len(events) > config.AGENT_CATALOG_LIMIT:
-            catalog += f"\n(показаны первые {config.AGENT_CATALOG_LIMIT} из {len(events)})"
         return catalog
 
     # --- построение действий для reg_list ---
@@ -599,19 +629,38 @@ class CalendarAgent:
         return PlanAction(kind="create", payload=payload)
 
     def _build_delete(self, chat_id: int, args: dict) -> PlanAction:
-        ref = (args.get("ref") or "").strip()
-        ev = self._session(chat_id)["refs"].get(ref)
-        if ev is None:
+        ref = (args.get("ref") or "").strip().strip("[]")
+        obj = self._session(chat_id)["refs"].get(ref)
+        if obj is None:
             raise ValueError(f"неизвестный ref '{ref}'. Вызови get_period заново и используй свежие токены.")
         scope = args.get("scope") or "instance"
         if scope not in ("instance", "all"):
             raise ValueError("scope должен быть instance или all")
+        if isinstance(obj, list):
+            ev = obj[0] if scope == "all" else self._resolve_instance(obj, args.get("date"))
+        else:
+            ev = obj
         return PlanAction(kind="delete", event=ev, scope=scope)
 
+    def _resolve_instance(self, instances: list, date_str: Optional[str]) -> EventData:
+        """Найти вхождение серии по дате (YYYY-MM-DD)."""
+        if not date_str:
+            dates = ", ".join(i.start.date().isoformat() for i in instances)
+            raise ValueError("для scope='instance' серии нужен date (YYYY-MM-DD) с датой вхождения. Возможные даты: " + dates)
+        try:
+            target = _parse_dt(date_str).date()
+        except ValueError:
+            raise ValueError("некорректный date. Используй формат YYYY-MM-DD.") from None
+        for inst in instances:
+            if inst.start.astimezone(config.TZ).date() == target:
+                return inst
+        dates = ", ".join(i.start.date().isoformat() for i in instances)
+        raise ValueError(f"в серии нет вхождения на {date_str}. Возможные даты в периоде: {dates}")
+
     def _build_update(self, chat_id: int, args: dict) -> PlanAction:
-        ref = (args.get("ref") or "").strip()
-        ev = self._session(chat_id)["refs"].get(ref)
-        if ev is None:
+        ref = (args.get("ref") or "").strip().strip("[]")
+        obj = self._session(chat_id)["refs"].get(ref)
+        if obj is None:
             raise ValueError(f"неизвестный ref '{ref}'. Вызови get_period заново и используй свежие токены.")
         changes = args.get("changes") or {}
         if not isinstance(changes, dict) or not changes:
@@ -638,9 +687,16 @@ class CalendarAgent:
                 raise ValueError("некорректный start. Используй формат YYYY-MM-DDTHH:MM:SS") from None
         if not any(changes.get(k) for k in ("summary", "start", "shift_minutes", "duration", "location")):
             raise ValueError("не указано, что именно изменить.")
-        scope = args.get("scope") or ("instance" if ev.is_recurring else "single")
-        if scope not in ("instance", "all", "single"):
-            scope = "instance"
+        if isinstance(obj, list):
+            scope = args.get("scope") or "instance"
+            if scope not in ("instance", "all"):
+                scope = "instance"
+            ev = obj[0] if scope == "all" else self._resolve_instance(obj, args.get("date"))
+        else:
+            ev = obj
+            scope = args.get("scope") or ("instance" if ev.is_recurring else "single")
+            if scope not in ("instance", "all", "single"):
+                scope = "instance"
         return PlanAction(kind="update", event=ev, scope=scope, changes=changes)
 
     def _tool_reg_list(self, chat_id: int, args: dict) -> str:
@@ -667,9 +723,36 @@ class CalendarAgent:
             except ValueError as exc:
                 lines.append(f"{i}. ❌ {exc}")
                 continue
+            key = _action_key(action)
+            if any(_action_key(existing) == key for existing in plan):
+                lines.append(f"{i}. ⏭ уже в плане: {_action_label(action)}")
+                continue
             plan.append(action)
             lines.append(f"{i}. ✅ {_action_label(action)}")
         return "План зарегистрирован:\n" + "\n".join(lines) if lines else "План пуст."
+
+
+def _action_key(action: PlanAction) -> tuple:
+    """Ключ тождественности действия для дедупликации плана."""
+    if action.kind == "create":
+        p = action.payload
+        return (
+            "create",
+            p["summary"],
+            p["start"].astimezone(config.TZ).isoformat(),
+            str(p["duration"]),
+            p.get("rrule"),
+        )
+    ev = action.event
+    inst_date = None
+    if action.scope == "instance":
+        inst = getattr(ev, "instance_start", None)
+        inst_date = inst.astimezone(config.TZ).date().isoformat() if inst else None
+    if action.kind == "update":
+        changes = action.changes or {}
+        norm = {k: v.isoformat() if isinstance(v, datetime) else v for k, v in changes.items()}
+        return ("update", ev.url, action.scope, inst_date, json.dumps(norm, sort_keys=True, default=str))
+    return (action.kind, ev.url, action.scope, inst_date)
 
 
 def _action_label(action: PlanAction) -> str:

@@ -26,7 +26,9 @@ TZ: ZoneInfo = ZoneInfo(os.getenv("TZ", "Europe/Moscow"))
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "")
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_THINKING: str = os.getenv("OPENAI_THINKING", "enabled").lower()
 REQUESTS_TIMEOUT_SECONDS: int = int(os.getenv("REQUESTS_TIMEOUT_SECONDS", "60"))
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Окно поиска (дней вперёд) для запросов «когда <событие>» / «что у меня есть» без явной даты.
 LIST_DEFAULT_DAYS: int = int(os.getenv("LIST_DEFAULT_DAYS", "90"))

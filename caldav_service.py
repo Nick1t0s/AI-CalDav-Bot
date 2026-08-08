@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 from uuid import uuid4
@@ -45,6 +45,7 @@ class EventData:
     series_count: int = 1  # сколько вхождений серии в запрошенном периоде
     series_first: Optional[datetime] = None
     series_last: Optional[datetime] = None
+    exdates: list = field(default_factory=list)  # исключённые даты мастера (локальные date)
 
     @property
     def duration(self) -> timedelta:
@@ -164,17 +165,34 @@ class CalDAVClient:
         rrule_obj = master_vevent.get("RRULE")
         is_recurring = rrule_obj is not None
         rrule = rrule_obj.to_ical().decode() if rrule_obj is not None else None
+        exdates = self._exdates_of(master_vevent)
         out: list[EventData] = []
         try:
             occurrences = recurring_ical_events.of(cal).between(start, end)
         except Exception:
             return out
         for vevent in occurrences:
-            out.append(self._to_event_data(vevent, master, is_recurring, rrule))
+            out.append(self._to_event_data(vevent, master, is_recurring, rrule, exdates))
         return out
 
+    @staticmethod
+    def _exdates_of(vevent: icalendar.Event) -> list:
+        """Локальные даты EXDATE мастер-события (дедуплицированные)."""
+        existing = vevent.get("EXDATE")
+        if existing is None:
+            return []
+        values: list[date] = []
+        for prop in existing if isinstance(existing, list) else [existing]:
+            for d in prop.dts:
+                dt = d.dt
+                if _is_all_day(dt):
+                    values.append(dt)
+                else:
+                    values.append(_ensure_aware(dt).astimezone(config.TZ).date())
+        return list(dict.fromkeys(values))
+
     def _to_event_data(
-        self, vevent, master, is_recurring: bool, rrule: Optional[str] = None
+        self, vevent, master, is_recurring: bool, rrule: Optional[str] = None, exdates: Optional[list] = None
     ) -> EventData:
         raw_start = vevent.decoded("DTSTART")
         try:
@@ -201,6 +219,7 @@ class CalDAVClient:
             is_recurring=is_recurring,
             instance_start=start if is_recurring else None,
             rrule=rrule,
+            exdates=exdates or [],
         )
 
     # ---------- создание ----------
@@ -288,6 +307,7 @@ class CalDAVClient:
                     for prop in existing if isinstance(existing, list) else [existing]:
                         values.extend(p.dt for p in prop.dts)
                 values.append(exdate_value)
+                values = list(dict.fromkeys(values))
                 if existing is not None:
                     del vevent["EXDATE"]
                 vevent["EXDATE"] = vDDDLists(values)
