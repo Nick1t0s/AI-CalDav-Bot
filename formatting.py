@@ -118,6 +118,12 @@ def describe_rrule(rrule: Optional[str]) -> str:
     else:
         parts.append("повторяется")
 
+    interval = _first("INTERVAL")
+    if interval is not None and int(interval) > 1:
+        n = int(interval)
+        unit = {"DAILY": "дня", "WEEKLY": "недели", "MONTHLY": "месяца", "YEARLY": "года"}.get(freq, "")
+        parts.insert(0, f"раз в {n} {unit}")
+
     until = _first("UNTIL")
     if until is not None:
         if isinstance(until, datetime):
@@ -127,6 +133,13 @@ def describe_rrule(rrule: Optional[str]) -> str:
     if count:
         parts.append(f"{count} раз")
     return ", ".join(parts)
+
+
+def _describe_alarms(alarms) -> str:
+    vals = sorted({m for m in (alarms or [])}, reverse=True)
+    if not vals:
+        return ""
+    return "напоминания за " + ", ".join(str(m) for m in vals) + " мин"
 
 
 def describe_event(ev) -> str:
@@ -144,6 +157,10 @@ def describe_event(ev) -> str:
         parts.append(ev.location)
     if ev.description:
         parts.append(ev.description)
+    if ev.alarms:
+        parts.append(_describe_alarms(ev.alarms))
+    if ev.categories:
+        parts.append("категории: " + ", ".join(ev.categories))
     return " · ".join(parts)
 
 
@@ -189,6 +206,11 @@ def format_catalog_compact(events, start=None, end=None, oneoff_limit: Optional[
                 excluded = [d for d in excluded if period_start <= d < period_end]
             if excluded:
                 line += " · кроме " + ", ".join(fmt_date(d) for d in excluded)
+            alarms = _describe_alarms(rep.alarms)
+            if alarms:
+                line += " · " + alarms
+            if rep.categories:
+                line += " · категории: " + ", ".join(rep.categories)
             lines.append(line)
         lines.append("")
 
@@ -256,12 +278,17 @@ def _plan_action_line(a) -> str:
     if a.kind == "create":
         p = a.payload
         start = p["start"].astimezone(config.TZ)
-        end = start + p["duration"]
-        line = f"✨ Создать <b>«{esc(p['summary'])}»</b> — {fmt_date(start.date())}, {start:%H:%M}–{end:%H:%M}"
+        if p.get("all_day"):
+            line = f"✨ Создать <b>«{esc(p['summary'])}»</b> — {fmt_date(start.date())}, весь день"
+        else:
+            end = start + p["duration"]
+            line = f"✨ Создать <b>«{esc(p['summary'])}»</b> — {fmt_date(start.date())}, {start:%H:%M}–{end:%H:%M}"
         if p.get("rrule"):
             line += f" · 🔁 {describe_rrule(p['rrule'])}"
         if p.get("location"):
             line += f" · 📍 {esc(p['location'])}"
+        if p.get("alarms"):
+            line += f" · 🔔 {_describe_alarms(p['alarms'])}"
         return line
 
     ev = a.event
@@ -284,6 +311,57 @@ def _plan_action_line(a) -> str:
         if changes.get("location") is not None:
             loc = esc(changes["location"]) if changes["location"] else "—"
             bits.append(f"место → {loc}")
+        if changes.get("description") is not None:
+            bits.append(f"описание → {esc(changes['description']) if changes['description'] else '—'}")
+        if changes.get("link") is not None:
+            bits.append(f"ссылка → {esc(changes['link']) if changes['link'] else '—'}")
+        if changes.get("all_day") is not None:
+            bits.append("весь день" if changes["all_day"] else "по времени")
+        if changes.get("alarms") is not None:
+            alarms = sorted(changes["alarms"], reverse=True)
+            text = "без напоминаний" if not alarms else ", ".join(str(m) for m in alarms) + " мин"
+            bits.append(f"напоминания → {text}")
+        if changes.get("categories") is not None:
+            cats = changes["categories"]
+            bits.append(f"категории → {', '.join(esc(c) for c in cats) if cats else '—'}")
+        if changes.get("status") is not None:
+            bits.append(f"статус → {esc(changes['status']) if changes['status'] else '—'}")
+        if changes.get("transp") is not None:
+            t = changes["transp"]
+            bits.append("доступность → свободен" if t == "TRANSPARENT" else "доступность → занят" if t == "OPAQUE" else "доступность → —")
+        if changes.get("priority") is not None:
+            bits.append(f"приоритет → {changes['priority'] if changes['priority'] else '—'}")
+        if changes.get("rrule"):
+            bits.append(f"повтор → {describe_rrule(changes['rrule'])}")
+        if changes.get("until") is not None:
+            if changes["until"]:
+                try:
+                    u = datetime.fromisoformat(changes["until"]).date()
+                    bits.append(f"серия до {fmt_date(u)}")
+                except ValueError:
+                    bits.append("серия до указанной даты")
+            else:
+                bits.append("серия без даты окончания")
+        if changes.get("count") is not None:
+            bits.append(f"всего {changes['count']} раз")
+        if changes.get("freq"):
+            bits.append(f"частота → {changes['freq']}")
+        if changes.get("interval") is not None:
+            bits.append(f"интервал → каждые {changes['interval']}")
+        if changes.get("byday") is not None:
+            bits.append("дни → " + ", ".join(changes["byday"]))
+        if changes.get("add_occurrence"):
+            try:
+                dt = datetime.fromisoformat(changes["add_occurrence"])
+                bits.append(f"+ вхождение {fmt_date(dt.date())}, {dt:%H:%M}")
+            except ValueError:
+                bits.append("+ внеплановое вхождение")
+        if changes.get("restore_occurrence"):
+            try:
+                d = date.fromisoformat(changes["restore_occurrence"])
+                bits.append(f"вернуть {fmt_date(d)}")
+            except ValueError:
+                bits.append("вернуть исключённую дату")
         target = "все вхождения" if a.scope == "all" else "это вхождение" if a.scope == "instance" else "событие"
         return f"📝 Изменить «{esc(ev.summary)}» ({target}): {', '.join(bits)}"
 

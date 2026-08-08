@@ -73,11 +73,15 @@ def build_tools() -> list[dict]:
                             "type": "array",
                             "description": (
                                 "add: summary + start (YYYY-MM-DDTHH:MM:SS), duration в минутах (по умолчанию 60), "
-                                "location, description, rrule. delete: ref (токен eN из каталога, со скобками [eN] тоже "
+                                "location, description, link (URL), all_day (событие «весь день», duration в днях: 1440=1 день), "
+                                "alarms (напоминания: минуты до начала, по умолчанию [60, 15, 5]), categories, status, transp, priority, rrule. "
+                                "delete: ref (токен eN из каталога, со скобками [eN] тоже "
                                 "принимается) + scope (instance|all), "
                                 "date (YYYY-MM-DD) — для серии при scope='instance'. "
                                 "update: ref + scope (instance|all) + date (аналогично) + changes {summary, start, "
-                                "shift_minutes, duration, location}."
+                                "shift_minutes, duration, location, description, link, all_day, alarms, categories, status, "
+                                "transp, priority, а для серии также rrule/until/count/freq/interval/byday и "
+                                "add_occurrence/restore_occurrence}."
                             ),
                             "items": {
                                 "type": "object",
@@ -88,6 +92,13 @@ def build_tools() -> list[dict]:
                                     "duration": {"type": "integer"},
                                     "location": {"type": "string"},
                                     "description": {"type": "string"},
+                                    "link": {"type": "string"},
+                                    "all_day": {"type": "boolean"},
+                                    "alarms": {"type": "array", "items": {"type": "integer"}},
+                                    "categories": {"type": "array", "items": {"type": "string"}},
+                                    "status": {"type": "string", "enum": ["CONFIRMED", "TENTATIVE", "CANCELLED"]},
+                                    "transp": {"type": "string", "enum": ["OPAQUE", "TRANSPARENT"]},
+                                    "priority": {"type": "integer"},
                                     "rrule": {"type": "string"},
                                     "ref": {"type": "string"},
                                     "scope": {"type": "string", "enum": ["instance", "all"]},
@@ -100,6 +111,22 @@ def build_tools() -> list[dict]:
                                             "shift_minutes": {"type": "integer"},
                                             "duration": {"type": "integer"},
                                             "location": {"type": "string"},
+                                            "description": {"type": "string"},
+                                            "link": {"type": "string"},
+                                            "all_day": {"type": "boolean"},
+                                            "alarms": {"type": "array", "items": {"type": "integer"}},
+                                            "categories": {"type": "array", "items": {"type": "string"}},
+                                            "status": {"type": "string", "enum": ["CONFIRMED", "TENTATIVE", "CANCELLED"]},
+                                            "transp": {"type": "string", "enum": ["OPAQUE", "TRANSPARENT"]},
+                                            "priority": {"type": "integer"},
+                                            "rrule": {"type": "string"},
+                                            "until": {"type": "string", "description": "дата окончания серии YYYY-MM-DD (или пустая строка — бесконечно)"},
+                                            "count": {"type": "integer"},
+                                            "freq": {"type": "string", "enum": ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"]},
+                                            "interval": {"type": "integer"},
+                                            "byday": {"type": "array", "items": {"type": "string"}},
+                                            "add_occurrence": {"type": "string", "description": "добавить внеплановое вхождение серии (YYYY-MM-DDTHH:MM:SS)"},
+                                            "restore_occurrence": {"type": "string", "description": "вернуть исключённую дату серии (YYYY-MM-DD)"},
                                         },
                                     },
                                 },
@@ -211,10 +238,23 @@ ask_user (question: «Перенести/удалить одно вхожден�
 FREQ=WEEKLY;BYDAY=MO, «по будням» → FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR, «каждый день» → FREQ=DAILY. \
 Для недельного повтора день недели в start обязан совпадать с BYDAY: если дата не указана, возьми \
 ближайший от сегодня подходящий день (например, для BYDAY=TU при сегодняшней пятнице — следующий \
-вторник).
-10. Изменение (op="update"): правки клади в changes: summary / start / shift_minutes / duration / \
-location. При переносе (start / shift_minutes) сохраняй прежнюю длительность события — duration \
-меняй, только если пользователь явно просил («сделай 30 минут»).
+вторник). Событие «весь день»: all_day: true и duration в днях (1440 = 1 день). Дополнительно можно \
+передать: location, description, link (URL), categories (список), status (CONFIRMED/TENTATIVE/CANCELLED), \
+transp (OPAQUE — занят / TRANSPARENT — свободен), priority (1–9).
+9а. Напоминания (alarms — минуты до начала): для создаваемых и изменяемых событий по умолчанию \
+указывай alarms: [60, 15, 5] (за час, 15 и 5 минут), если пользователь не попросил другой набор \
+интервалов или не попросил убрать напоминания (тогда alarms: []). При изменении события сохраняй \
+существующие напоминания, если пользователь не сказал иного.
+10. Изменение (op="update"): правки клади в changes. Общие свойства: summary / start / shift_minutes / \
+duration / location / description / link / categories / status / transp / priority / all_day / alarms. \
+При переносе (start / shift_minutes) сохраняй прежнюю длительность — duration меняй, только если \
+пользователь явно просил. Для серии (scope="all") можно править и само правило повтора: \
+until (дата окончания серии, YYYY-MM-DD; пустая строка — бесконечно), count (сколько вхождений), \
+freq (DAILY/WEEKLY/MONTHLY/YEARLY), interval (каждые N периодов), byday (список дней недели MO..SU), \
+либо заменить правило целиком через rrule (формат RRULE, напр. FREQ=WEEKLY;BYDAY=MO,TH). \
+Если меняешь byday для недельного повтора — учти, что день недели начала (start) должен попадать в \
+byday, иначе поменяй и start. add_occurrence (YYYY-MM-DDTHH:MM:SS) — добавить в серию внеплановое \
+вхождение. restore_occurrence (YYYY-MM-DD) — вернуть ранее исключённую дату серии.
 11. ask_user: question — текст вопроса, options — 1–4 варианта ответа. Спрашивай ТОЛЬКО когда \
 запрос неоднозначен или не хватает данных, чтобы выполнить его (какое событие, какая дата, одно \
 вхождение или вся серия). Никогда не переспрашивай подтверждение явного указания пользователя \
@@ -296,6 +336,48 @@ def _normalize_rrule(value: str) -> Optional[str]:
     except Exception:
         return None
     return value
+
+
+WEEKDAY_CODES = {"MO", "TU", "WE", "TH", "FR", "SA", "SU"}
+
+
+def _norm_alarms(items) -> list:
+    if not isinstance(items, list):
+        raise ValueError("некорректный alarms: нужен список минут")
+    out: list = []
+    for item in items:
+        try:
+            m = int(item)
+        except (TypeError, ValueError):
+            raise ValueError("некорректный alarms: нужны целые минуты") from None
+        if m > 0:
+            out.append(m)
+    return sorted(set(out))
+
+
+def _norm_categories(items) -> list:
+    if not isinstance(items, list):
+        raise ValueError("некорректный categories: нужен список")
+    return [str(c).strip() for c in items if str(c).strip()]
+
+
+def _norm_priority(value) -> int:
+    try:
+        p = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("некорректный priority") from None
+    if not 1 <= p <= 9:
+        raise ValueError("priority должен быть от 1 до 9")
+    return p
+
+
+def _norm_byday(items) -> list:
+    if not isinstance(items, list):
+        raise ValueError("некорректный byday: нужен список дней")
+    days = [str(d).strip().upper() for d in items]
+    if not days or any(d not in WEEKDAY_CODES for d in days):
+        raise ValueError("некорректный byday: используй коды MO,TU,WE,TH,FR,SA,SU")
+    return days
 
 
 def _resolve_period(args: dict) -> tuple[datetime, datetime]:
@@ -626,6 +708,22 @@ class CalendarAgent:
             "description": (args.get("description") or "").strip() or None,
             "rrule": rrule,
         }
+        if args.get("all_day") is not None:
+            payload["all_day"] = bool(args["all_day"])
+        if args.get("alarms") is not None:
+            payload["alarms"] = _norm_alarms(args["alarms"])
+        if args.get("categories") is not None:
+            payload["categories"] = _norm_categories(args["categories"])
+        for key, allowed in (("status", ("CONFIRMED", "TENTATIVE", "CANCELLED")), ("transp", ("OPAQUE", "TRANSPARENT"))):
+            if args.get(key):
+                val = str(args[key]).strip().upper()
+                if val not in allowed:
+                    raise ValueError(f"некорректный {key}: {val}")
+                payload[key] = val
+        if args.get("priority") is not None:
+            payload["priority"] = _norm_priority(args["priority"])
+        if args.get("link"):
+            payload["link"] = str(args["link"]).strip()
         return PlanAction(kind="create", payload=payload)
 
     def _build_delete(self, chat_id: int, args: dict) -> PlanAction:
@@ -665,7 +763,7 @@ class CalendarAgent:
         changes = args.get("changes") or {}
         if not isinstance(changes, dict) or not changes:
             raise ValueError("нужно заполнить changes.")
-        for key in ("summary", "start", "location"):
+        for key in ("summary", "start", "location", "description", "link"):
             if key in changes and isinstance(changes[key], str):
                 changes[key] = changes[key].strip() or None
         if changes.get("duration") is not None:
@@ -685,7 +783,70 @@ class CalendarAgent:
                 _parse_dt(changes["start"])
             except ValueError:
                 raise ValueError("некорректный start. Используй формат YYYY-MM-DDTHH:MM:SS") from None
-        if not any(changes.get(k) for k in ("summary", "start", "shift_minutes", "duration", "location")):
+        if "until" in changes and changes.get("until"):
+            try:
+                _parse_dt(changes["until"])
+            except ValueError:
+                raise ValueError("некорректный until. Используй YYYY-MM-DD или YYYY-MM-DDTHH:MM:SS") from None
+        if "count" in changes and changes.get("count") is not None:
+            try:
+                changes["count"] = int(changes["count"])
+            except (TypeError, ValueError):
+                raise ValueError("некорректный count") from None
+            if changes["count"] < 1:
+                raise ValueError("count должен быть ≥ 1")
+        if "interval" in changes and changes.get("interval") is not None:
+            try:
+                changes["interval"] = int(changes["interval"])
+            except (TypeError, ValueError):
+                raise ValueError("некорректный interval") from None
+            if changes["interval"] < 1:
+                raise ValueError("interval должен быть ≥ 1")
+        if changes.get("freq"):
+            changes["freq"] = str(changes["freq"]).strip().upper()
+            if changes["freq"] not in ("DAILY", "WEEKLY", "MONTHLY", "YEARLY"):
+                raise ValueError("некорректный freq")
+        if changes.get("byday") is not None:
+            changes["byday"] = _norm_byday(changes["byday"])
+        if changes.get("rrule"):
+            rrule = _normalize_rrule(changes["rrule"])
+            if rrule is None:
+                raise ValueError(f"некорректный rrule: {changes['rrule']}")
+            changes["rrule"] = rrule
+        if changes.get("alarms") is not None:
+            changes["alarms"] = _norm_alarms(changes["alarms"])
+        if changes.get("categories") is not None:
+            changes["categories"] = _norm_categories(changes["categories"])
+        for key, allowed in (("status", ("CONFIRMED", "TENTATIVE", "CANCELLED")), ("transp", ("OPAQUE", "TRANSPARENT"))):
+            if changes.get(key) is not None:
+                val = str(changes[key]).strip().upper()
+                changes[key] = val if val in allowed else ""
+        if changes.get("priority") is not None:
+            changes["priority"] = _norm_priority(changes["priority"])
+        if "all_day" in changes:
+            changes["all_day"] = bool(changes["all_day"])
+        if changes.get("add_occurrence"):
+            try:
+                _parse_dt(changes["add_occurrence"])
+            except ValueError:
+                raise ValueError("некорректный add_occurrence. Формат YYYY-MM-DDTHH:MM:SS") from None
+        if changes.get("restore_occurrence"):
+            try:
+                datetime.fromisoformat(changes["restore_occurrence"])
+            except ValueError:
+                raise ValueError("некорректный restore_occurrence. Формат YYYY-MM-DD") from None
+
+        series_only = ("add_occurrence", "restore_occurrence")
+        if any(changes.get(k) for k in series_only) and not isinstance(obj, list):
+            raise ValueError("add_occurrence/restore_occurrence доступны только для повторяющейся серии.")
+
+        any_key = (
+            "summary", "start", "shift_minutes", "duration", "location", "description", "link",
+            "all_day", "alarms", "categories", "status", "transp", "priority",
+            "rrule", "until", "count", "freq", "interval", "byday",
+            "add_occurrence", "restore_occurrence",
+        )
+        if not any(changes.get(k) is not None for k in any_key):
             raise ValueError("не указано, что именно изменить.")
         if isinstance(obj, list):
             scope = args.get("scope") or "instance"
@@ -742,6 +903,7 @@ def _action_key(action: PlanAction) -> tuple:
             p["start"].astimezone(config.TZ).isoformat(),
             str(p["duration"]),
             p.get("rrule"),
+            tuple(p.get("alarms") or []),
         )
     ev = action.event
     inst_date = None

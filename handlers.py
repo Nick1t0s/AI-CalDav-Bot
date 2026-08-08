@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
 from html import escape as esc
 
 from aiogram import F, Router
@@ -19,11 +18,11 @@ import config
 from agent import AgentError, answer_ask, append_assistant_text, resume_agent, run_agent
 from asks import cleanup_expired as cleanup_asks, consume_ask, get_ask, kb_ask
 from caldav_service import (
-    CalDAVError,
     create_event,
     delete_event,
     exclude_occurrence,
     update_event,
+    update_instance,
 )
 from confirmation import (
     PlanAction,
@@ -35,7 +34,6 @@ from confirmation import (
     kb_plan_confirm,
 )
 from formatting import (
-    _new_start,
     describe_rrule,
     format_ask,
     format_done,
@@ -272,31 +270,8 @@ def _run_update_action(action: PlanAction) -> str:
     ev = action.event
     changes = action.changes or {}
     if ev.is_recurring and action.scope == "instance":
-        payload = _build_updated_payload(ev, changes)
-        create_event(**payload)
-        try:
-            exclude_occurrence(ev)
-        except CalDAVError:
-            return (
-                "⚠️ Создано новое событие «"
-                f"{esc(payload['summary'])}», но старое вхождение не удалось исключить из серии."
-            )
-        return f"✅ Изменено: «{esc(payload['summary'])}» (вхождение вынесено в отдельное событие)"
+        update_instance(ev, changes)
+        return f"✅ Изменено: «{esc(changes.get('summary') or ev.summary)}» (это вхождение)"
     update_event(ev, changes)
     summary = changes.get("summary") or ev.summary
     return f"✅ Изменено: «{esc(summary)}»"
-
-
-def _build_updated_payload(ev, changes: dict) -> dict:
-    start = _new_start(ev, changes)
-    duration = timedelta(minutes=int(changes["duration"])) if changes.get("duration") else ev.duration
-    summary = changes.get("summary") or ev.summary
-    location = changes.get("location") if changes.get("location") is not None else ev.location
-    return {
-        "summary": summary,
-        "start": start,
-        "duration": duration,
-        "location": location or None,
-        "description": ev.description or None,
-        "rrule": None,
-    }
