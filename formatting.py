@@ -229,7 +229,14 @@ def format_done(message: str, items: list[str]) -> str:
     out = [esc(message)]
     if items:
         out.extend(["", "<b>📋 Детали</b>", ""])
-        out.extend(f"• {esc(item)}" for item in items)
+        for item in items:
+            lowered = item.strip().lower()
+            if lowered.startswith("серии"):
+                out.append(f"🔁 <b>{esc(item)}</b>")
+            elif lowered.startswith("одиночные"):
+                out.append(f"📅 <b>{esc(item)}</b>")
+            else:
+                out.append(f"• {esc(item)}")
     return "\n".join(out)
 
 
