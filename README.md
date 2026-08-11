@@ -33,6 +33,26 @@ pip install -r requirements.txt
 cp .env.example .env   # затем отредактируйте .env
 ```
 
+## Запуск в Docker
+
+```bash
+cp .env.example .env   # затем отредактируйте .env
+docker compose up -d --build
+```
+
+Контейнер читает переменные окружения из `.env` (через `env_file`) — монтирование томов не
+нужно: приложение stateless, все данные хранятся в CalDAV. Просмотр логов:
+
+```bash
+docker compose logs -f
+```
+
+Остановка:
+
+```bash
+docker compose down
+```
+
 ## Настройка
 
 ### 1. Telegram-бот

@@ -4,3 +4,4 @@ icalendar>=5.0,<6
 openai>=1.0,<2
 python-dotenv>=1.0,<2
 python-dateutil>=2.8
+recurring-ical-events>=3.0,<4

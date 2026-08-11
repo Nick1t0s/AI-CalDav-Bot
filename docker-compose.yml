@@ -1,0 +1,8 @@
+services:
+  bot:
+    build: .
+    image: ai-caldav-bot:latest
+    container_name: ai-caldav-bot
+    restart: unless-stopped
+    env_file:
+      - .env
