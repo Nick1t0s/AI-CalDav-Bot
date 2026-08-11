@@ -808,8 +808,29 @@ def create_event(
     location: Optional[str] = None,
     description: Optional[str] = None,
     rrule: Optional[str] = None,
+    all_day: bool = False,
+    alarms: Optional[list] = None,
+    categories: Optional[list] = None,
+    status: Optional[str] = None,
+    transp: Optional[str] = None,
+    priority: Optional[int] = None,
+    link: Optional[str] = None,
 ) -> EventData:
-    return get_client().create_event(summary, start, duration, location, description, rrule)
+    return get_client().create_event(
+        summary,
+        start,
+        duration,
+        location,
+        description,
+        rrule,
+        all_day,
+        alarms,
+        categories,
+        status,
+        transp,
+        priority,
+        link,
+    )
 
 
 def delete_event(ev: EventData) -> None:

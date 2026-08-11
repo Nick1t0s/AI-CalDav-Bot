@@ -12,17 +12,15 @@ from html import escape as esc
 from aiogram import F, Router
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 import config
-from agent import AgentError, answer_ask, append_assistant_text, resume_agent, run_agent
-from asks import cleanup_expired as cleanup_asks, consume_ask, get_ask, kb_ask
+from agent import AgentError, append_assistant_text, run_agent
+from asks import cleanup_expired as cleanup_asks, kb_ask
 from caldav_service import (
     create_event,
     delete_event,
     exclude_occurrence,
-    update_event,
-    update_instance,
 )
 from confirmation import (
     PlanAction,
@@ -128,11 +126,11 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
     if user_id is None:
         user_id = message.from_user.id if message.from_user else 0
     if result.kind == "error":
-        await message.answer(f"😕 {esc(result.text)}")
+        await message.answer(f"😕 {esc(result.text)}", reply_markup=ReplyKeyboardRemove())
         return
     if result.kind == "ask":
         for q in result.questions:
-            await message.answer(format_ask(q["question"]), reply_markup=kb_ask(q["ask_id"], q["options"]))
+            await message.answer(format_ask(q["question"]), reply_markup=kb_ask(q["options"]))
         return
     if result.plan:
         op = PlanOp(user_id=user_id, actions=result.plan)
@@ -142,46 +140,10 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
         content += "\n\n" + format_plan(result.plan)
         await message.answer(content, reply_markup=kb_plan_confirm(op_id))
     else:
-        await message.answer(format_done(result.text or "🤷 Не понял, что сделать.", result.items))
+        await message.answer(format_done(result.text or "🤷 Не понял, что сделать.", result.items), reply_markup=ReplyKeyboardRemove())
 
 
 # ---------- callback ----------
-
-
-@router.callback_query(F.data.startswith("ask:"))
-async def on_ask_callback(cb: CallbackQuery) -> None:
-    cleanup_asks()
-    parts = cb.data.split(":")
-    if len(parts) < 3:
-        await cb.answer()
-        return
-    ask_id, idx = parts[1], parts[2]
-    ask = get_ask(ask_id)
-    if ask is None:
-        await cb.answer("Вопрос устарел, попробуйте ещё раз.", show_alert=True)
-        return
-    if cb.from_user.id != ask.user_id:
-        await cb.answer("Это не ваш вопрос.", show_alert=True)
-        return
-    try:
-        option = ask.options[int(idx)]
-    except (ValueError, IndexError):
-        await cb.answer()
-        return
-    consume_ask(ask_id)
-    all_done = await asyncio.to_thread(answer_ask, cb.from_user.id, ask_id, option)
-    await _safe_edit(cb.message, f"{format_ask(ask.question)}\n✓ {esc(option)}")
-    if not all_done:
-        await cb.answer("Осталось ответить на другие вопросы.")
-        return
-    try:
-        result = await asyncio.to_thread(resume_agent, cb.from_user.id)
-    except AgentError as exc:
-        await _safe_edit(cb.message, f"😕 Ошибка агента: {esc(str(exc))}")
-        await cb.answer()
-        return
-    await _handle_result(cb.message, result, user_id=cb.from_user.id)
-    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("op:"))
@@ -242,8 +204,8 @@ def _perform_action(action: PlanAction) -> str:
         return _run_create_action(action.payload)
     if action.kind == "delete":
         return _run_delete_action(action)
-    if action.kind == "update":
-        return _run_update_action(action)
+    if action.kind == "exclude":
+        return _run_exclude_action(action)
     return "❌ Неизвестное действие"
 
 
@@ -258,20 +220,12 @@ def _run_create_action(payload: dict) -> str:
 
 def _run_delete_action(action: PlanAction) -> str:
     ev = action.event
-    if action.scope == "all" or not ev.is_recurring:
-        delete_event(ev)
-        return f"✅ Удалено: «{esc(ev.summary)}»"
+    delete_event(ev)
+    return f"✅ Удалено: «{esc(ev.summary)}»"
+
+
+def _run_exclude_action(action: PlanAction) -> str:
+    ev = action.event
     exclude_occurrence(ev)
     when = "весь день" if ev.all_day else f"{ev.start:%H:%M}"
-    return f"✅ Удалено вхождение: «{esc(ev.summary)}» ({fmt_dtime(ev.start)}, {when})"
-
-
-def _run_update_action(action: PlanAction) -> str:
-    ev = action.event
-    changes = action.changes or {}
-    if ev.is_recurring and action.scope == "instance":
-        update_instance(ev, changes)
-        return f"✅ Изменено: «{esc(changes.get('summary') or ev.summary)}» (это вхождение)"
-    update_event(ev, changes)
-    summary = changes.get("summary") or ev.summary
-    return f"✅ Изменено: «{esc(summary)}»"
+    return f"✅ Исключено вхождение: «{esc(ev.summary)}» ({fmt_dtime(ev.start)}, {when})"

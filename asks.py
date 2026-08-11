@@ -1,8 +1,9 @@
-"""Реестр «ожидающих вопросов» (ask_user) и inline-клавиатуры вариантов.
+"""Реестр «ожидающих вопросов» (ask_user) и reply-клавиатуры вариантов.
 
 Вопрос задаётся моделью через инструмент ask_user (agent.py): цикл ставится на
-паузу, вопрос уходит в чат с кнопками вариантов. Ответ (кнопка или текст)
-подаётся модели как результат инструмента, после чего цикл возобновляется.
+паузу, вопрос уходит в чат с reply-клавиатурой вариантов (KeyboardButton).
+Ответ (кнопка или произвольный текст) подаётся модели как результат
+инструмента, после чего цикл возобновляется.
 """
 from __future__ import annotations
 
@@ -11,9 +12,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
-CALLBACK_PREFIX = "ask:"
 ASK_TTL_SECONDS = 15 * 60
 
 _BUTTON_LABEL_MAX = 40
@@ -60,15 +60,15 @@ def cleanup_expired() -> None:
 # ---------- клавиатуры ----------
 
 
-def kb_ask(ask_id: str, options: list[str]) -> Optional[InlineKeyboardMarkup]:
+def kb_ask(options: list[str]) -> Optional[ReplyKeyboardMarkup]:
+    """Reply-клавиатура вариантов ответа (пользователь может и написать свой)."""
     if not options:
         return None
-    buttons = [
-        InlineKeyboardButton(
-            text=o[:_BUTTON_LABEL_MAX],
-            callback_data=f"{CALLBACK_PREFIX}{ask_id}:{i}",
-        )
-        for i, o in enumerate(options)
-    ]
+    buttons = [KeyboardButton(text=o[:_BUTTON_LABEL_MAX]) for o in options]
     rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Ответьте или выберите вариант",
+    )

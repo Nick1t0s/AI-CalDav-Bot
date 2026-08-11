@@ -243,7 +243,7 @@ def format_catalog_compact(events, start=None, end=None, oneoff_limit: Optional[
 
 def format_ask(question: str) -> str:
     """Текст вопроса ask_user (HTML для Telegram)."""
-    return f"❓ {esc(question)}"
+    return f"❓ {esc(question)}\n<i>(можно написать свой ответ)</i>"
 
 
 def format_done(message: str, items: list[str]) -> str:
@@ -293,89 +293,13 @@ def _plan_action_line(a) -> str:
 
     ev = a.event
     if a.kind == "delete":
-        if a.scope == "all" and ev.is_recurring:
+        if ev.is_recurring:
             return f"🗑 Удалить <b>все повторения</b> «{esc(ev.summary)}»"
         when = "весь день" if ev.all_day else f"{ev.start:%H:%M}"
         return f"🗑 Удалить «{esc(ev.summary)}» ({fmt_dtime(ev.start)}, {when})"
 
-    if a.kind == "update":
-        changes = a.changes or {}
-        bits: list[str] = []
-        if changes.get("summary") is not None:
-            bits.append(f"название → «{esc(changes['summary'])}»")
-        if changes.get("start") or changes.get("shift_minutes"):
-            ns = _new_start(ev, changes)
-            bits.append(f"начало → {ns:%H:%M}")
-        if changes.get("duration"):
-            bits.append(f"длительность → {int(changes['duration'])} мин")
-        if changes.get("location") is not None:
-            loc = esc(changes["location"]) if changes["location"] else "—"
-            bits.append(f"место → {loc}")
-        if changes.get("description") is not None:
-            bits.append(f"описание → {esc(changes['description']) if changes['description'] else '—'}")
-        if changes.get("link") is not None:
-            bits.append(f"ссылка → {esc(changes['link']) if changes['link'] else '—'}")
-        if changes.get("all_day") is not None:
-            bits.append("весь день" if changes["all_day"] else "по времени")
-        if changes.get("alarms") is not None:
-            alarms = sorted(changes["alarms"], reverse=True)
-            text = "без напоминаний" if not alarms else ", ".join(str(m) for m in alarms) + " мин"
-            bits.append(f"напоминания → {text}")
-        if changes.get("categories") is not None:
-            cats = changes["categories"]
-            bits.append(f"категории → {', '.join(esc(c) for c in cats) if cats else '—'}")
-        if changes.get("status") is not None:
-            bits.append(f"статус → {esc(changes['status']) if changes['status'] else '—'}")
-        if changes.get("transp") is not None:
-            t = changes["transp"]
-            bits.append("доступность → свободен" if t == "TRANSPARENT" else "доступность → занят" if t == "OPAQUE" else "доступность → —")
-        if changes.get("priority") is not None:
-            bits.append(f"приоритет → {changes['priority'] if changes['priority'] else '—'}")
-        if changes.get("rrule"):
-            bits.append(f"повтор → {describe_rrule(changes['rrule'])}")
-        if changes.get("until") is not None:
-            if changes["until"]:
-                try:
-                    u = datetime.fromisoformat(changes["until"]).date()
-                    bits.append(f"серия до {fmt_date(u)}")
-                except ValueError:
-                    bits.append("серия до указанной даты")
-            else:
-                bits.append("серия без даты окончания")
-        if changes.get("count") is not None:
-            bits.append(f"всего {changes['count']} раз")
-        if changes.get("freq"):
-            bits.append(f"частота → {changes['freq']}")
-        if changes.get("interval") is not None:
-            bits.append(f"интервал → каждые {changes['interval']}")
-        if changes.get("byday") is not None:
-            bits.append("дни → " + ", ".join(changes["byday"]))
-        if changes.get("add_occurrence"):
-            try:
-                dt = datetime.fromisoformat(changes["add_occurrence"])
-                bits.append(f"+ вхождение {fmt_date(dt.date())}, {dt:%H:%M}")
-            except ValueError:
-                bits.append("+ внеплановое вхождение")
-        if changes.get("restore_occurrence"):
-            try:
-                d = date.fromisoformat(changes["restore_occurrence"])
-                bits.append(f"вернуть {fmt_date(d)}")
-            except ValueError:
-                bits.append("вернуть исключённую дату")
-        target = "все вхождения" if a.scope == "all" else "это вхождение" if a.scope == "instance" else "событие"
-        return f"📝 Изменить «{esc(ev.summary)}» ({target}): {', '.join(bits)}"
+    if a.kind == "exclude":
+        when = "весь день" if ev.all_day else f"{ev.start:%H:%M}"
+        return f"⛔ Исключить вхождение «{esc(ev.summary)}» ({fmt_dtime(ev.start)}, {when})"
 
     return "❓ Неизвестное действие"
-
-
-def _new_start(ev, changes: dict) -> datetime:
-    start_iso = changes.get("start")
-    if start_iso:
-        dt = datetime.fromisoformat(start_iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=config.TZ)
-        return dt.astimezone(config.TZ)
-    shift = changes.get("shift_minutes")
-    if shift:
-        return ev.start + timedelta(minutes=int(shift))
-    return ev.start

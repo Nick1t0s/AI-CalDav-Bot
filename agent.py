@@ -45,8 +45,8 @@ def build_tools() -> list[dict]:
                 "name": "get_period",
                 "description": (
                     "Все события за период: серии свёрнуты одной строкой (каждый Пн, время, "
-                    f"кроме …), одиночные — по дням. Без дат — следующие {config.LIST_DEFAULT_DAYS} "
-                    "дней. Возвращает пронумерованный список с токенами [eN], которые нужны для reg_list."
+                    "кроме …), одиночные — по дням. date_from и date_to ОБЯЗАТЕЛЬНЫ — сам выбирай "
+                    "период под запрос. Возвращает пронумерованный список с токенами [eN], которые нужны для reg_list."
                 ),
                 "parameters": {
                     "type": "object",
@@ -54,6 +54,7 @@ def build_tools() -> list[dict]:
                         "date_from": {"type": "string", "description": "YYYY-MM-DD, начало периода (включительно)"},
                         "date_to": {"type": "string", "description": "YYYY-MM-DD, конец периода (включительно)"},
                     },
+                    "required": ["date_from", "date_to"],
                 },
             },
         },
@@ -63,8 +64,7 @@ def build_tools() -> list[dict]:
                 "name": "reg_list",
                 "description": (
                     "Зарегистрировать список изменений в план одним вызовом. Каждый элемент actions — "
-                    "объект с op='add' | 'delete' | 'update' и полями конкретного действия. "
-                    "Исполнится после подтверждения пользователем."
+                    "объект с op='add' | 'delete' | 'exclude'. Исполнится после подтверждения пользователем."
                 ),
                 "parameters": {
                     "type": "object",
@@ -75,18 +75,14 @@ def build_tools() -> list[dict]:
                                 "add: summary + start (YYYY-MM-DDTHH:MM:SS), duration в минутах (по умолчанию 60), "
                                 "location, description, link (URL), all_day (событие «весь день», duration в днях: 1440=1 день), "
                                 "alarms (напоминания: минуты до начала, по умолчанию [60, 15, 5]), categories, status, transp, priority, rrule. "
-                                "delete: ref (токен eN из каталога, со скобками [eN] тоже "
-                                "принимается) + scope (instance|all), "
-                                "date (YYYY-MM-DD) — для серии при scope='instance'. "
-                                "update: ref + scope (instance|all) + date (аналогично) + changes {summary, start, "
-                                "shift_minutes, duration, location, description, link, all_day, alarms, categories, status, "
-                                "transp, priority, а для серии также rrule/until/count/freq/interval/byday и "
-                                "add_occurrence/restore_occurrence}."
+                                "delete: ref (токен eN события/серии целиком, со скобками [eN] тоже принимается). "
+                                "exclude: ref (токен ПОВТОРЯЮЩЕЙСЯ серии) + date (YYYY-MM-DD) — внести одно вхождение "
+                                "в список исключений серии (удалить именно это вхождение, не трогая остальные). "
                             ),
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "op": {"type": "string", "enum": ["add", "delete", "update"]},
+                                    "op": {"type": "string", "enum": ["add", "delete", "exclude"]},
                                     "summary": {"type": "string"},
                                     "start": {"type": "string"},
                                     "duration": {"type": "integer"},
@@ -101,34 +97,7 @@ def build_tools() -> list[dict]:
                                     "priority": {"type": "integer"},
                                     "rrule": {"type": "string"},
                                     "ref": {"type": "string"},
-                                    "scope": {"type": "string", "enum": ["instance", "all"]},
-                                    "date": {"type": "string", "description": "YYYY-MM-DD, конкретная дата вхождения серии (только для scope='instance')"},
-                                    "changes": {
-                                        "type": "object",
-                                        "properties": {
-                                            "summary": {"type": "string"},
-                                            "start": {"type": "string"},
-                                            "shift_minutes": {"type": "integer"},
-                                            "duration": {"type": "integer"},
-                                            "location": {"type": "string"},
-                                            "description": {"type": "string"},
-                                            "link": {"type": "string"},
-                                            "all_day": {"type": "boolean"},
-                                            "alarms": {"type": "array", "items": {"type": "integer"}},
-                                            "categories": {"type": "array", "items": {"type": "string"}},
-                                            "status": {"type": "string", "enum": ["CONFIRMED", "TENTATIVE", "CANCELLED"]},
-                                            "transp": {"type": "string", "enum": ["OPAQUE", "TRANSPARENT"]},
-                                            "priority": {"type": "integer"},
-                                            "rrule": {"type": "string"},
-                                            "until": {"type": "string", "description": "дата окончания серии YYYY-MM-DD (или пустая строка — бесконечно)"},
-                                            "count": {"type": "integer"},
-                                            "freq": {"type": "string", "enum": ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"]},
-                                            "interval": {"type": "integer"},
-                                            "byday": {"type": "array", "items": {"type": "string"}},
-                                            "add_occurrence": {"type": "string", "description": "добавить внеплановое вхождение серии (YYYY-MM-DDTHH:MM:SS)"},
-                                            "restore_occurrence": {"type": "string", "description": "вернуть исключённую дату серии (YYYY-MM-DD)"},
-                                        },
-                                    },
+                                    "date": {"type": "string", "description": "YYYY-MM-DD, дата вхождения серии для exclude"},
                                 },
                                 "required": ["op"],
                             },
@@ -143,8 +112,9 @@ def build_tools() -> list[dict]:
             "function": {
                 "name": "ask_user",
                 "description": (
-                    "Задать вопрос пользователю. question — текст вопроса, options — 1–4 варианта "
-                    "ответа (кнопками). Диалог приостановится до ответа пользователя."
+                    "Задать ОДИН вопрос пользователю. question — текст вопроса, options — 1–4 варианта "
+                    "ответа (кнопки). Пользователь может выбрать вариант или написать свой ответ текстом. "
+                    "Спрашивай по одному вопросу за раз: задай вопрос, дождись ответа, затем продолжай."
                 ),
                 "parameters": {
                     "type": "object",
@@ -192,18 +162,22 @@ TOOLS = build_tools()
 
 
 SYSTEM_TEMPLATE = """Ты — ассистент, который управляет календарём пользователя через инструменты. \
-Каждый ход ты обязан закончить вызовом done (финальный ответ) или ask_user (уточняющий вопрос) — \
-обычный текст без инструментов недопустим. Изменения ты НЕ выполняешь сам: любое \
-создание/изменение/удаление ты регистрируешь через reg_list, а подтверждает пользователь \
-кнопкой, исполняет скрипт.
+Ты работаешь «ходами»: один ход — обработка одного сообщения/ответа пользователя. Внутри хода ты \
+вызываешь инструменты (get_period, reg_list, ask_user), накапливая план изменений. Каждый ход ОБЯЗАН \
+завершиться ровно одним из двух инструментов: done (финальный ответ, ход закончен) либо ask_user \
+(уточняющий вопрос — ход ставится на паузу и продолжится после ответа пользователя). Обычный текст \
+без инструментов недопустим. За один вызов можно вернуть несколько инструментов (например, \
+get_period + ask_user) — они выполнятся в указанном порядке, но вопросы задавай только после сбора \
+нужных данных и только по одному за раз.
 
 Дата сегодня: {date} ({date_dmy}). Сейчас: {time}. Часовой пояс: {tz}.
 
 Правила:
-1. Чтобы найти или посмотреть события, вызывай get_period. НЕ выдумывай события, даты и факты о \
-календаре — сначала всегда запрашивай его через get_period.
-2. «ближайшее/следующее/предстоящее» вхождение — вызови get_period без дат (по умолчанию следующие \
-{list_days} дней) и выбери событие с ближайшей датой. Не угадывай дату сам.
+1. Чтобы найти или посмотреть события, вызывай get_period. date_from и date_to ОБЯЗАТЕЛЬНЫ — \
+всегда задавай конкретный период (YYYY-MM-DD), который покрывает запрос. НЕ выдумывай события, \
+даты и факты о календаре — сначала всегда запрашивай его через get_period.
+2. «ближайшее/следующее/предстоящее» — вызови get_period на разумный период вперёд \
+(например, от сегодня до +30 дней) и выбери событие с ближайшей датой. Не угадывай дату сам.
 3. Если get_period вернул «Ничего не найдено» — в done ответь «Удалять нечего», «Событий нет» и т.п., \
 без выдумок.
 4. Выбор события: если запрос однозначно определяет одно событие (полное название или его \
@@ -213,24 +187,24 @@ SYSTEM_TEMPLATE = """Ты — ассистент, который управля�
 «Юайти алгоритмы», не спрашивай; просто «юайти» — подходят оба, задай вопрос.
 5. Одноразовое событие и повторяющаяся серия с одинаковым названием — это РАЗНЫЕ события \
 (серии показаны в блоке «Серии» одной строкой, одиночные — в «Одиночные события»). \
-«Все повторения / всю серию» — только про серию (scope="all"), не трогая одноразовые события.
+Удаление/изменение всегда работает с ЦЕЛЫМ событием или серией: delete удаляет весь объект \
+(одиночное событие или серию целиком). Удалить ОДНО вхождение серии можно только через exclude \
+(внести его дату в список исключений серии). Изменить что-либо (вхождение серии, всю серию или \
+одиночное событие) можно только как «удалить старое + создать новое»: для одного вхождения — \
+exclude (исключить дату) + add (создать новое событие), для целого объекта — delete + add.
 6. НЕ планируй удаление/изменение нескольких событий за один ход, если пользователь явно не просил \
 несколько («удали оба», «перенеси обе тренировки» и т.п.). Все изменения одного хода — ОДНИМ \
 вызовом reg_list со списком actions. План накапливается и переживает паузу на ask_user: уже \
 зарегистрированные действия повторно НЕ регистрируй (в истории уже есть ответ «План зарегистрирован») \
 — после ответа пользователя просто заверши ход вызовом done.
 7. Повторяющиеся события: серия показана в каталоге ОДНИМ токеном [eN] с описанием «каждый Пн, \
-время, кроме …». scope="instance" — только одно вхождение серии (удалить/перенести именно эту дату): \
-тогда обязательно передай date (YYYY-MM-DD) конкретного вхождения — возьми её из запроса пользователя \
-или вычисли по правилу («следующий понедельник» и т.п.), с учётом исключений «кроме …». \
-scope="all" — вся серия целиком (просто токен серии, без date). Если событие повторяется, а \
-пользователь не сказал явно «одно/это вхождение» или «всю серию/все» — обязательно спроси через \
-ask_user (question: «Перенести/удалить одно вхождение или всю серию?», options: «Это вхождение», \
-«Всю серию»). Для «Это вхождение» уточни дату: если пользователь её не назвал — ask_user с вариантами \
+время, кроме …». Для exclude нужна конкретная дата вхождения (YYYY-MM-DD): возьми её из запроса \
+пользователя или вычисли по правилу («следующий понедельник» и т.п.), с учётом исключений «кроме …». \
+Если пользователь не сказал явно «одно/это вхождение» или «всю серию/все» — обязательно спроси через \
+ask_user (question: «Удалить одно вхождение или всю серию?», options: «Это вхождение», «Всю серию»). \
+Для «Это вхождение» уточни дату: если пользователь её не назвал — ask_user с вариантами \
 датами вхождений (для серии это даты «каждый Пн», кроме исключений). После ответов зарегистрируй \
-план с выбранным scope, date (для instance) и токеном серии. Пример: «перенеси юайти на час позже» — \
-сначала выбери/уточни событие и дату вхождения (правило 4), затем спроси про scope и дату, и только \
-потом reg_list. Можно задать оба вопроса в одном шаге двумя вызовами ask_user.
+план: для одного вхождения — exclude с датой, для всей серии — delete.
 8. Все изменения — только через reg_list. Никогда не пиши «сделано», «удалено», «создано» — до \
 подтверждения это лишь план.
 9. Создание (op="add"): summary и start обязательны (start — YYYY-MM-DDTHH:MM:SS в часовом поясе \
@@ -241,26 +215,18 @@ FREQ=WEEKLY;BYDAY=MO, «по будням» → FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
 вторник). Событие «весь день»: all_day: true и duration в днях (1440 = 1 день). Дополнительно можно \
 передать: location, description, link (URL), categories (список), status (CONFIRMED/TENTATIVE/CANCELLED), \
 transp (OPAQUE — занят / TRANSPARENT — свободен), priority (1–9).
-9а. Напоминания (alarms — минуты до начала): для создаваемых и изменяемых событий по умолчанию \
-указывай alarms: [60, 15, 5] (за час, 15 и 5 минут), если пользователь не попросил другой набор \
-интервалов или не попросил убрать напоминания (тогда alarms: []). При изменении события сохраняй \
-существующие напоминания, если пользователь не сказал иного.
-10. Изменение (op="update"): правки клади в changes. Общие свойства: summary / start / shift_minutes / \
-duration / location / description / link / categories / status / transp / priority / all_day / alarms. \
-При переносе (start / shift_minutes) сохраняй прежнюю длительность — duration меняй, только если \
-пользователь явно просил. Для серии (scope="all") можно править и само правило повтора: \
-until (дата окончания серии, YYYY-MM-DD; пустая строка — бесконечно), count (сколько вхождений), \
-freq (DAILY/WEEKLY/MONTHLY/YEARLY), interval (каждые N периодов), byday (список дней недели MO..SU), \
-либо заменить правило целиком через rrule (формат RRULE, напр. FREQ=WEEKLY;BYDAY=MO,TH). \
-Если меняешь byday для недельного повтора — учти, что день недели начала (start) должен попадать в \
-byday, иначе поменяй и start. add_occurrence (YYYY-MM-DDTHH:MM:SS) — добавить в серию внеплановое \
-вхождение. restore_occurrence (YYYY-MM-DD) — вернуть ранее исключённую дату серии.
-11. ask_user: question — текст вопроса, options — 1–4 варианта ответа. Спрашивай ТОЛЬКО когда \
-запрос неоднозначен или не хватает данных, чтобы выполнить его (какое событие, какая дата, одно \
-вхождение или вся серия). Никогда не переспрашивай подтверждение явного указания пользователя \
-(«Вы уверены?», «Точно удалить?» и т.п.) — прямое указание уже является решением: сразу \
-зарегистрируй план через reg_list и заверши ход done. После ответа пользователя продолжи и \
-заверши done.
+9а. Напоминания (alarms — минуты до начала): для создаваемых событий по умолчанию указывай \
+alarms: [60, 15, 5] (за час, 15 и 5 минут), если пользователь не попросил другой набор \
+интервалов или не попросил убрать напоминания (тогда alarms: []).
+10. Удаление (op="delete"): ref — токен события/серии целиком из каталога get_period. Удаление \
+всегда ЦЕЛОЕ: одиночное событие или вся серия. Одно вхождение серии — op="exclude" с ref серии и \
+date вхождения.
+11. ask_user: question — текст вопроса, options — 1–4 варианта ответа кнопками; пользователь может \
+и написать свой ответ. Уточняй ВСЕГДА, когда в запросе есть неопределённость (какое событие, какая \
+дата, одно вхождение или вся серия, какой период). Как можно чаще предлагай варианты ответа \
+(options), но не переспрашивай явное указание пользователя («Вы уверены?» и т.п.) — прямое указание \
+уже является решением: сразу зарегистрируй план через reg_list и заверши ход done. Задавай по одному \
+вопросу за раз: задал вопрос → получил ответ → продолжай (возможно, следующим вопросом).
 12. Отвечай кратко по-русски, без markdown и эмодзи. Не упоминай в тексте пользователю токены ref \
 и технические детали инструментов. В done клади суть в message, а перечисление (например, события с \
 датой и временем) — отдельными короткими пунктами в items.
@@ -320,7 +286,6 @@ def build_system_prompt() -> str:
         date_dmy=f"{now:%d.%m.%Y}",
         time=f"{now:%H:%M}",
         tz=now.tzinfo,
-        list_days=config.LIST_DEFAULT_DAYS,
     )
 
 
@@ -336,9 +301,6 @@ def _normalize_rrule(value: str) -> Optional[str]:
     except Exception:
         return None
     return value
-
-
-WEEKDAY_CODES = {"MO", "TU", "WE", "TH", "FR", "SA", "SU"}
 
 
 def _norm_alarms(items) -> list:
@@ -369,15 +331,6 @@ def _norm_priority(value) -> int:
     if not 1 <= p <= 9:
         raise ValueError("priority должен быть от 1 до 9")
     return p
-
-
-def _norm_byday(items) -> list:
-    if not isinstance(items, list):
-        raise ValueError("некорректный byday: нужен список дней")
-    days = [str(d).strip().upper() for d in items]
-    if not days or any(d not in WEEKDAY_CODES for d in days):
-        raise ValueError("некорректный byday: используй коды MO,TU,WE,TH,FR,SA,SU")
-    return days
 
 
 def _resolve_period(args: dict) -> tuple[datetime, datetime]:
@@ -567,15 +520,17 @@ class CalendarAgent:
 
             self._append(chat_id, self._to_assistant_msg(choice))
             logger.debug("AGENT chat=%s шаг=%d tool_calls=%d", chat_id, step + 1, len(tool_calls))
-            asked = False
+            ask_pending = None
             done_msg = None
             done_items: list[str] = []
             for tc in tool_calls:
                 name = tc.function.name
                 logger.debug("AGENT chat=%s шаг=%d tool=%s args=%s", chat_id, step + 1, name, tc.function.arguments)
                 if name == "ask_user":
-                    asked = True
-                    self._register_ask(chat_id, tc.id, tc.function.arguments)
+                    if ask_pending is None:
+                        ask_pending = tc
+                    else:
+                        logger.warning("AGENT chat=%s шаг=%d игнорирую лишний ask_user", chat_id, step + 1)
                     continue
                 if name == "done":
                     try:
@@ -590,7 +545,8 @@ class CalendarAgent:
                 logger.debug("AGENT chat=%s шаг=%d tool=%s result=%r", chat_id, step + 1, name, result[:500])
                 self._append_tool_response(chat_id, tc.id, result)
 
-            if asked:
+            if ask_pending is not None:
+                self._register_ask(chat_id, ask_pending.id, ask_pending.function.arguments)
                 sess = self._session(chat_id)
                 questions = [q for q in sess["pending_asks"] if not q["posted"]]
                 for q in questions:
@@ -667,6 +623,8 @@ class CalendarAgent:
             return f"Ошибка при выполнении {name}: {exc}"
 
     def _tool_get_period(self, chat_id: int, args: dict) -> str:
+        if not args.get("date_from") or not args.get("date_to"):
+            return "Ошибка: get_period требует date_from и date_to (YYYY-MM-DD)."
         start, end = _resolve_period(args)
         try:
             events = caldav_service.list_events(start, end)
@@ -731,20 +689,14 @@ class CalendarAgent:
         obj = self._session(chat_id)["refs"].get(ref)
         if obj is None:
             raise ValueError(f"неизвестный ref '{ref}'. Вызови get_period заново и используй свежие токены.")
-        scope = args.get("scope") or "instance"
-        if scope not in ("instance", "all"):
-            raise ValueError("scope должен быть instance или all")
-        if isinstance(obj, list):
-            ev = obj[0] if scope == "all" else self._resolve_instance(obj, args.get("date"))
-        else:
-            ev = obj
-        return PlanAction(kind="delete", event=ev, scope=scope)
+        ev = obj[0] if isinstance(obj, list) else obj
+        return PlanAction(kind="delete", event=ev)
 
     def _resolve_instance(self, instances: list, date_str: Optional[str]) -> EventData:
         """Найти вхождение серии по дате (YYYY-MM-DD)."""
         if not date_str:
             dates = ", ".join(i.start.date().isoformat() for i in instances)
-            raise ValueError("для scope='instance' серии нужен date (YYYY-MM-DD) с датой вхождения. Возможные даты: " + dates)
+            raise ValueError("для exclude серии нужен date (YYYY-MM-DD) с датой вхождения. Возможные даты: " + dates)
         try:
             target = _parse_dt(date_str).date()
         except ValueError:
@@ -755,110 +707,15 @@ class CalendarAgent:
         dates = ", ".join(i.start.date().isoformat() for i in instances)
         raise ValueError(f"в серии нет вхождения на {date_str}. Возможные даты в периоде: {dates}")
 
-    def _build_update(self, chat_id: int, args: dict) -> PlanAction:
+    def _build_exclude(self, chat_id: int, args: dict) -> PlanAction:
         ref = (args.get("ref") or "").strip().strip("[]")
         obj = self._session(chat_id)["refs"].get(ref)
         if obj is None:
             raise ValueError(f"неизвестный ref '{ref}'. Вызови get_period заново и используй свежие токены.")
-        changes = args.get("changes") or {}
-        if not isinstance(changes, dict) or not changes:
-            raise ValueError("нужно заполнить changes.")
-        for key in ("summary", "start", "location", "description", "link"):
-            if key in changes and isinstance(changes[key], str):
-                changes[key] = changes[key].strip() or None
-        if changes.get("duration") is not None:
-            try:
-                changes["duration"] = int(changes["duration"])
-            except (TypeError, ValueError):
-                raise ValueError("некорректный duration (минуты)") from None
-            if changes["duration"] <= 0:
-                raise ValueError("некорректный duration (минуты)")
-        if changes.get("shift_minutes") is not None:
-            try:
-                changes["shift_minutes"] = int(changes["shift_minutes"])
-            except (TypeError, ValueError):
-                raise ValueError("некорректный shift_minutes (минуты)") from None
-        if changes.get("start"):
-            try:
-                _parse_dt(changes["start"])
-            except ValueError:
-                raise ValueError("некорректный start. Используй формат YYYY-MM-DDTHH:MM:SS") from None
-        if "until" in changes and changes.get("until"):
-            try:
-                _parse_dt(changes["until"])
-            except ValueError:
-                raise ValueError("некорректный until. Используй YYYY-MM-DD или YYYY-MM-DDTHH:MM:SS") from None
-        if "count" in changes and changes.get("count") is not None:
-            try:
-                changes["count"] = int(changes["count"])
-            except (TypeError, ValueError):
-                raise ValueError("некорректный count") from None
-            if changes["count"] < 1:
-                raise ValueError("count должен быть ≥ 1")
-        if "interval" in changes and changes.get("interval") is not None:
-            try:
-                changes["interval"] = int(changes["interval"])
-            except (TypeError, ValueError):
-                raise ValueError("некорректный interval") from None
-            if changes["interval"] < 1:
-                raise ValueError("interval должен быть ≥ 1")
-        if changes.get("freq"):
-            changes["freq"] = str(changes["freq"]).strip().upper()
-            if changes["freq"] not in ("DAILY", "WEEKLY", "MONTHLY", "YEARLY"):
-                raise ValueError("некорректный freq")
-        if changes.get("byday") is not None:
-            changes["byday"] = _norm_byday(changes["byday"])
-        if changes.get("rrule"):
-            rrule = _normalize_rrule(changes["rrule"])
-            if rrule is None:
-                raise ValueError(f"некорректный rrule: {changes['rrule']}")
-            changes["rrule"] = rrule
-        if changes.get("alarms") is not None:
-            changes["alarms"] = _norm_alarms(changes["alarms"])
-        if changes.get("categories") is not None:
-            changes["categories"] = _norm_categories(changes["categories"])
-        for key, allowed in (("status", ("CONFIRMED", "TENTATIVE", "CANCELLED")), ("transp", ("OPAQUE", "TRANSPARENT"))):
-            if changes.get(key) is not None:
-                val = str(changes[key]).strip().upper()
-                changes[key] = val if val in allowed else ""
-        if changes.get("priority") is not None:
-            changes["priority"] = _norm_priority(changes["priority"])
-        if "all_day" in changes:
-            changes["all_day"] = bool(changes["all_day"])
-        if changes.get("add_occurrence"):
-            try:
-                _parse_dt(changes["add_occurrence"])
-            except ValueError:
-                raise ValueError("некорректный add_occurrence. Формат YYYY-MM-DDTHH:MM:SS") from None
-        if changes.get("restore_occurrence"):
-            try:
-                datetime.fromisoformat(changes["restore_occurrence"])
-            except ValueError:
-                raise ValueError("некорректный restore_occurrence. Формат YYYY-MM-DD") from None
-
-        series_only = ("add_occurrence", "restore_occurrence")
-        if any(changes.get(k) for k in series_only) and not isinstance(obj, list):
-            raise ValueError("add_occurrence/restore_occurrence доступны только для повторяющейся серии.")
-
-        any_key = (
-            "summary", "start", "shift_minutes", "duration", "location", "description", "link",
-            "all_day", "alarms", "categories", "status", "transp", "priority",
-            "rrule", "until", "count", "freq", "interval", "byday",
-            "add_occurrence", "restore_occurrence",
-        )
-        if not any(changes.get(k) is not None for k in any_key):
-            raise ValueError("не указано, что именно изменить.")
-        if isinstance(obj, list):
-            scope = args.get("scope") or "instance"
-            if scope not in ("instance", "all"):
-                scope = "instance"
-            ev = obj[0] if scope == "all" else self._resolve_instance(obj, args.get("date"))
-        else:
-            ev = obj
-            scope = args.get("scope") or ("instance" if ev.is_recurring else "single")
-            if scope not in ("instance", "all", "single"):
-                scope = "instance"
-        return PlanAction(kind="update", event=ev, scope=scope, changes=changes)
+        if not isinstance(obj, list):
+            raise ValueError("exclude работает только для повторяющейся серии. Для одиночного события используй delete.")
+        ev = self._resolve_instance(obj, args.get("date"))
+        return PlanAction(kind="exclude", event=ev)
 
     def _tool_reg_list(self, chat_id: int, args: dict) -> str:
         actions = args.get("actions")
@@ -876,8 +733,8 @@ class CalendarAgent:
                     action = self._build_add(act)
                 elif op == "delete":
                     action = self._build_delete(chat_id, act)
-                elif op == "update":
-                    action = self._build_update(chat_id, act)
+                elif op == "exclude":
+                    action = self._build_exclude(chat_id, act)
                 else:
                     lines.append(f"{i}. ❌ неизвестный op: {op!r}")
                     continue
@@ -906,15 +763,11 @@ def _action_key(action: PlanAction) -> tuple:
             tuple(p.get("alarms") or []),
         )
     ev = action.event
-    inst_date = None
-    if action.scope == "instance":
+    if action.kind == "exclude":
         inst = getattr(ev, "instance_start", None)
         inst_date = inst.astimezone(config.TZ).date().isoformat() if inst else None
-    if action.kind == "update":
-        changes = action.changes or {}
-        norm = {k: v.isoformat() if isinstance(v, datetime) else v for k, v in changes.items()}
-        return ("update", ev.url, action.scope, inst_date, json.dumps(norm, sort_keys=True, default=str))
-    return (action.kind, ev.url, action.scope, inst_date)
+        return ("exclude", ev.url, inst_date)
+    return (action.kind, ev.url)
 
 
 def _action_label(action: PlanAction) -> str:
@@ -922,9 +775,12 @@ def _action_label(action: PlanAction) -> str:
         return f"создать «{action.payload['summary']}»"
     ev = action.event
     if action.kind == "delete":
-        return f"удалить «{ev.summary}» (scope={action.scope})"
-    if action.kind == "update":
-        return f"изменить «{ev.summary}» (scope={action.scope})"
+        target = "вся серия" if ev.is_recurring else "событие"
+        return f"удалить {target} «{ev.summary}»"
+    if action.kind == "exclude":
+        inst = getattr(ev, "instance_start", None)
+        when = inst.astimezone(config.TZ).strftime("%d.%m.%Y") if inst else ""
+        return f"исключить вхождение «{ev.summary}» от {when}"
     return "неизвестное действие"
 
 
