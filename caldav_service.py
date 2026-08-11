@@ -139,6 +139,7 @@ def _set_alarms(vevent: icalendar.Event, minutes: list) -> None:
 
 RRULE_FREQS = {"DAILY", "WEEKLY", "MONTHLY", "YEARLY"}
 WEEKDAY_CODES = {"MO", "TU", "WE", "TH", "FR", "SA", "SU"}
+_WEEKDAY_CODE = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
 
 
 def _until_dt(value: str) -> datetime:
@@ -230,6 +231,46 @@ def _patch_rrule(vevent: icalendar.Event, changes: dict) -> None:
     for k, v in parts.items():
         rr[k] = v
     _replace_prop(vevent, "RRULE", rr)
+
+
+def _byday_codes(existing) -> list:
+    """Простые коды дней недели из BYDAY (без порядковых номеров вида 2TU)."""
+    if existing is None:
+        return []
+    items = existing if isinstance(existing, list) else [existing]
+    out: list = []
+    for item in items:
+        s = item.to_ical().decode() if hasattr(item, "to_ical") else str(item)
+        s = s.strip().upper()
+        if s in WEEKDAY_CODES:
+            out.append(s)
+    return out
+
+
+def _align_weekly_byday(vevent: icalendar.Event, changes: dict, new_start: datetime) -> Optional[dict]:
+    """Перенос недельной серии: если DTSTART меняет день недели — синхронизировать BYDAY.
+
+    Возвращает копию changes с добавленным byday (если нужна правка) либо None.
+    """
+    if not new_start or "byday" in changes or "rrule" in changes:
+        return None
+    existing = vevent.get("RRULE")
+    if existing is None:
+        return None
+    freq = existing.get("FREQ")
+    if isinstance(freq, list):
+        freq = freq[0] if freq else None
+    if freq is None or str(freq).strip().upper() != "WEEKLY":
+        return None
+    codes = _byday_codes(existing.get("BYDAY"))
+    if not codes:
+        return None
+    target = _WEEKDAY_CODE[new_start.weekday()]
+    if target in codes:
+        return None
+    changes = dict(changes)
+    changes["byday"] = [target]
+    return changes
 
 
 def _add_rdate(vevent: icalendar.Event, value: str) -> None:
@@ -611,6 +652,10 @@ class CalDAVClient:
                         new_duration = timedelta(minutes=old_duration.days * 1440)
                 else:
                     new_all_day = all_day
+
+                aligned = _align_weekly_byday(vevent, changes, new_start)
+                if aligned is not None:
+                    changes = aligned
 
                 new_summary = changes.get("summary")
                 new_location = changes.get("location")

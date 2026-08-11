@@ -27,11 +27,11 @@ class BaseOp:
 class PlanAction:
     """Одно действие плана (исполнится после подтверждения)."""
 
-    kind: str  # "create" | "delete" | "exclude"
-    event: Optional[EventData] = None  # delete/exclude
+    kind: str  # "create" | "delete" | "exclude" | "update"
+    event: Optional[EventData] = None  # delete/exclude/update
     payload: Optional[dict] = None  # create
     scope: str = "single"  # delete/exclude: instance | all | single (не используется для серий)
-    changes: Optional[dict] = None  # не используется (update убран)
+    changes: Optional[dict] = None  # update: правки для целого события/серии
 
 
 @dataclass

@@ -27,6 +27,13 @@ def _now() -> datetime:
     return datetime.now(config.TZ)
 
 
+def _parse_dt(value: str) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=config.TZ)
+    return dt
+
+
 def fmt_date(d: date) -> str:
     return f"{WEEKDAYS[d.weekday()]}, {d.day} {MONTHS_GEN[d.month - 1]}"
 
@@ -301,5 +308,28 @@ def _plan_action_line(a) -> str:
     if a.kind == "exclude":
         when = "весь день" if ev.all_day else f"{ev.start:%H:%M}"
         return f"⛔ Исключить вхождение «{esc(ev.summary)}» ({fmt_dtime(ev.start)}, {when})"
+
+    if a.kind == "update":
+        ch = a.changes
+        line = f"✏️ Изменить <b>«{esc(ch.get('summary') or ev.summary)}»</b>"
+        bits: list[str] = []
+        if ch.get("start"):
+            new_start = _parse_dt(ch["start"])
+            when = "весь день" if ch.get("all_day") else f"{new_start:%H:%M}"
+            bits.append(f"начало → {fmt_dtime(new_start)}, {when}")
+        if ch.get("duration") is not None:
+            d = int(ch["duration"])
+            if ch.get("all_day"):
+                days = d // 1440
+                bits.append("длительность → 1 день" if days == 1 else f"длительность → {days} дн.")
+            else:
+                bits.append(f"длительность → {d} мин")
+        if ch.get("summary"):
+            bits.append(f"название → «{esc(ch['summary'])}»")
+        if ch.get("rrule"):
+            bits.append(f"повтор → {describe_rrule(ch['rrule'])}")
+        if bits:
+            line += ": " + " · ".join(bits)
+        return line
 
     return "❓ Неизвестное действие"

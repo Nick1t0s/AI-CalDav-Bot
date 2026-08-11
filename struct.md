@@ -240,7 +240,7 @@ API**: указывается `OPENAI_BASE_URL` (OpenAI, OpenRouter, локал�
 | Имя | Роль |
 |---|---|
 | `get_period` | Прочитать календарь за период (только чтение, выполняется сразу). |
-| `reg_list` | Зарегистрировать список изменений (создать/удалить/исключить вхождение) в план. |
+| `reg_list` | Зарегистрировать список изменений (создать/удалить/исключить вхождение/обновить) в план. |
 | `ask_user` | Задать пользователю вопрос с кнопками-вариантами. |
 | `done` | Завершить ход: финальный ответ (+накопленный план). |
 
@@ -479,11 +479,11 @@ AI-CalDav-Bot/
 
 | Поле | Смысл |
 |---|---|
-| `kind` | `"create"` / `"delete"` / `"exclude"`. |
-| `event` | `EventData`, к которому относится действие (для delete/exclude). |
+| `kind` | `"create"` / `"delete"` / `"exclude"` / `"update"`. |
+| `event` | `EventData`, к которому относится действие (для delete/exclude/update). |
 | `payload` | Словарь параметров для создания (для create). |
-| `scope` | Оставлен для совместимости, но **не используется** (операции `update` и `scope=instance/all` убраны). |
-| `changes` | Оставлен для совместимости, **не используется** (update убран). |
+| `scope` | Оставлен для совместимости, но **не используется** (`scope=instance/all` убраны). |
+| `changes` | Правки для `update` (целое событие/серия). |
 
 ## 4.3. `BaseOp` / `PlanOp` (`confirmation.py`)
 
@@ -710,6 +710,8 @@ on_message(text="Это вхождение")
   ресурс (одиночное событие или вся серия целиком).
 - `exclude` → `_run_exclude_action(action)` → `exclude_occurrence(ev)` — в мастер
   серии добавляется `EXDATE` (исключается одно вхождение).
+- `update` → `_run_update_action(action)` → `update_event(ev, changes)` — правка
+  мастер-события (одиночное событие или вся серия, UID сохраняется).
 
 Если какое-то действие упало — оно не роняет остальные: `_perform_plan`
 оборачивает каждое в try/except и добавляет строку «❌ Ошибка: …».
@@ -830,7 +832,7 @@ on_message(text="Это вхождение")
 
 **`reg_list`** — регистрация изменений.
 - Параметр `actions` — массив объектов. Каждый элемент имеет `op` в
-  `{add, delete, exclude}` и поля конкретного действия.
+  `{add, delete, exclude, update}` и поля конкретного действия.
 - Для `add`: `summary`, `start` (YYYY-MM-DDTHH:MM:SS), `duration` (минуты, по
   умолчанию 60), `location`, `description`, `link`, `all_day` (весь день,
   длительность в днях: 1440 = 1 день), `alarms` (минуты до начала, по умолчанию
@@ -840,10 +842,15 @@ on_message(text="Это вхождение")
   или вся серия).
 - Для `exclude`: `ref` (токен **повторяющейся серии**) + `date` (YYYY-MM-DD) —
   внести одно вхождение в список исключений серии (EXDATE).
+- Для `update`: `ref` (токен `[eN]` события/серии **целиком**) + `changes` —
+  правки ЦЕЛОГО объекта: `summary`, `start`, `duration`, `all_day`, `location`,
+  `description`, `link`, `alarms`, `categories`, `status`, `transp`, `priority`,
+  `rrule` (либо `freq`/`interval`/`byday`/`until`/`count`). UID сохраняется;
+  одно вхождение серии через `update` не меняется.
 - **Не пишет в календарь.** Только валидирует и складывает `PlanAction` в план
   сессии. Операции повторяют примитивы CalDAV (`create_event` / `delete_event` /
-  `exclude_occurrence`); изменения «1 вхождение» и «правки» выполняются
-  комбинацией: исключить/удалить старое + создать новое.
+  `exclude_occurrence` / `update_event`). Изменение одного вхождения серии — это
+  исключение + создание: `exclude` (старое) + `add` (новое).
 
 **`ask_user`** — вопрос пользователю.
 - Параметры: `question` (текст), `options` (1–4 варианта ответа кнопками
@@ -883,9 +890,9 @@ on_message(text="Это вхождение")
    без вопроса; если несколько одинаково подходят — `ask_user` с вариантами
    (пример: «юайти алгоритмы» — однозначно, просто «юайти» — спросить).
 6. Одноразовое событие и повторяющаяся серия с тем же названием — РАЗНЫЕ
-   события. `delete` всегда работает с ЦЕЛЫМ объектом (одиночное или вся серия);
-   одно вхождение серии удаляется только через `exclude`. Изменение = «удалить
-   старое + создать новое».
+   события. `delete` и `update` всегда работают с ЦЕЛЫМ объектом (одиночное
+   событие или вся серия); одно вхождение серии удаляется/изменяется только
+   через `exclude` + `add`.
 7. НЕ планировать несколько удалений/изменений за один ход, если пользователь
    явно не просил. Все изменения одного хода — ОДНИМ вызовом `reg_list` со
    списком `actions`. План переживает паузу на `ask_user`; уже
@@ -907,6 +914,10 @@ on_message(text="Это вхождение")
     если пользователь не просил иное (или `alarms: []` — убрать).
 11. Удаление (`op="delete"`): `ref` — токен события/серии целиком. Одно
     вхождение серии — `op="exclude"` с `ref` серии и `date` вхождения.
+11а. Обновление (`op="update"`): `ref` + `changes` — правки целого объекта
+    (одиночное событие или вся серия, UID сохраняется). Одно вхождение серии —
+    только `exclude` + `add`. При переносе недельной серии на другой день
+    недели `BYDAY` обновится автоматически.
 12. `ask_user`: уточнять ВСЕГДА при неопределённости (какое событие, какая
     дата, одно вхождение или вся серия, какой период); как можно чаще
     предлагать варианты (`options`), пользователь может и написать свой ответ.
@@ -1069,6 +1080,7 @@ return error("Не удалось обработать запрос за отв�
   - `_build_add` → `PlanAction(kind="create", payload=...)`;
   - `_build_delete` → `PlanAction(kind="delete", event=...)`;
   - `_build_exclude` → `PlanAction(kind="exclude", event=<вхождение>)`;
+  - `_build_update` → `PlanAction(kind="update", event=..., changes=...)`;
 - ошибка валидации одного действия **не роняет остальные**: ему в строку
   пишется `N. ❌ ошибка`, остальные обрабатываются;
 - **дедупликация**: `_action_key(action)` — ключ тождественности. Если такой
@@ -1078,7 +1090,7 @@ return error("Не удалось обработать запрос за отв�
 
 **`_action_key` (строка 896):** для create — `(summary, start ISO, duration,
 rrule, alarms)`; для delete — `(ev.url)`; для exclude — `(ev.url, дата
-вхождения)`.
+вхождения)`; для update — `(ev.url, JSON изменений)`.
 
 **`_build_add` (строка 685):**
 - обязательны `summary` и `start` (иначе ошибка с подсказкой формата);
@@ -1113,6 +1125,17 @@ rrule, alarms)`; для delete — `(ev.url)`; для exclude — `(ev.url, да
 - `PlanAction(kind="exclude", event=<вхождение>)` — при исполнении в мастер
   добавится `EXDATE`.
 
+**`_build_update` (строка 790):**
+- те же проверки `ref` (токен события/серии целиком);
+- `_norm_changes(changes)` — валидация правок: `summary`, `start` (ISO),
+  `duration` (минуты ≥ 1), `all_day`, `location`/`description`/`link` (пустая
+  строка очищает свойство), `alarms`/`categories`, `status`/`transp` (белый
+  список), `priority` (1–9), `rrule` (через `_normalize_rrule`),
+  `freq`/`interval`/`byday`/`until`/`count`;
+- если `changes` пуст → ошибка «для update нужен changes…»;
+- `PlanAction(kind="update", event=ev, changes=changes)` — при исполнении
+  правится мастер-событие (`update_event`), UID сохраняется.
+
 ### 6.4.10. `ask_user` (`_register_ask`, строка 510)
 
 - разбирает `arguments` (JSON);
@@ -1135,8 +1158,6 @@ rrule, alarms)`; для delete — `(ev.url)`; для exclude — `(ev.url, да
 - `_norm_categories(items)` — список непустых строк.
 - `_norm_priority(value)` — целое 1–9.
 - `_parse_dt` / `_day_start` / `_now` — работа с датами в TZ.
-
-(Примечание: `_norm_byday` удалён вместе с операцией `update`.)
 
 ### 6.4.12. Модульный фасад
 
@@ -1308,9 +1329,10 @@ rrule, alarms)`; для delete — `(ev.url)`; для exclude — `(ev.url, да
 
 ### 6.7.10. Изменение мастера: `update_event(ev, changes)` (строка 580)
 
-> **Примечание:** метод оставлен в сервисе для совместимости, но агент его
-> больше **не вызывает** — операция `update` из `reg_list` убрана. Все правки
-> агент делает комбинацией `add`/`delete`/`exclude`.
+> Метод вызывается агентом через `op="update"` в `reg_list` (см. 6.4.9).
+> Область действия — только ЦЕЛЫЙ объект (одиночное событие или вся серия);
+> UID сохраняется. Одно вхождение серии так не правится — только
+> `exclude` + `add`.
 
 1. Загружает мастер, читает `raw_start`, определяет `all_day`,
    `old_start`, `old_duration`.
@@ -1320,9 +1342,15 @@ rrule, alarms)`; для delete — `(ev.url)`; для exclude — `(ev.url, да
 4. Правки полей: `SUMMARY`, `LOCATION`, `DESCRIPTION` (пустая строка —
    удалить свойство), `alarms`, `categories`, `status`, `transp`, `priority`,
    `url`.
-5. Правка правила повтора, если меняется `rrule/until/count/freq/interval/byday`.
-6. `add_occurrence` → `_add_rdate`; `restore_occurrence` → `_restore_exdate`.
-7. `_set_start(vevent, new_start, new_duration, all_day)`:
+5. **Синхронизация переноса серии:** `_align_weekly_byday(vevent, changes,
+   new_start)` — если меняется `DTSTART` недельной серии (`FREQ=WEEKLY` с
+   простыми кодами `BYDAY`, без порядковых номеров) и в `changes` явно не
+   заданы `byday`/`rrule`, а день недели нового начала отличается — в
+   `changes` добавляется `byday` с кодом нового дня недели (перенос серии
+   «целиком на другой день»).
+6. Правка правила повтора, если меняется `rrule/until/count/freq/interval/byday`.
+7. `add_occurrence` → `_add_rdate`; `restore_occurrence` → `_restore_exdate`.
+8. `_set_start(vevent, new_start, new_duration, all_day)`:
    - удаляется `DURATION` (используем явный DTEND);
    - all-day: даты без времени; иначе: в UTC.
 8. `target.data = cal.to_ical(); target.save()`.
@@ -1437,10 +1465,10 @@ transp, priority, link` — ровно те ключи, которые клад�
 - `_plan_action_line(a)` — читаемое описание одного действия:
   - create: «✨ Создать «…» — Пн, 10 августа, 20:00–21:00 · 🔁 … · 📍 … · 🔔 …»;
   - delete: «🗑 Удалить все повторения «…»» / «🗑 Удалить «…» (завтра, 17:00)»;
-  - update: «📝 Изменить «…» (это вхождение): название → «…», начало → 19:00,
-    …» (все поддерживаемые поля).
-- `_new_start(ev, changes)` — новая дата начала: из `changes["start"]` или
-  `ev.start + shift_minutes`.
+  - exclude: «⛔ Исключить вхождение «…» (завтра, 17:00)»;
+  - update: «✏️ Изменить «…»: начало → …, длительность → …» — перечисляются
+    меняемые поля (`start`, `duration`, `summary`, `rrule`); событие/серия
+    целиком, UID сохраняется.
 
 ## 6.9. `agent_demo.py` — CLI-песочница
 
@@ -1498,7 +1526,8 @@ result = await asyncio.to_thread(run_agent, message.from_user.id, text)
 ## 7.3. Блокировки CalDAV
 
 `CalDAVClient._lock` — RLock вокруг всех сетевых операций с сервером
-(`list_events`, `create_event`, `delete_event`, `exclude_occurrence`). Плюс
+(`list_events`, `create_event`, `delete_event`, `exclude_occurrence`,
+`update_event`). Плюс
 синглтон `get_client()` защищён отдельным `_client_lock` при создании
 (double-checked locking). Зачем: один клиент общий для всех, и правки одного
 потока не должны конфликтовать с чтением другого.
@@ -1515,7 +1544,7 @@ result = await asyncio.to_thread(run_agent, message.from_user.id, text)
 # Часть 8. Безопасность (по пунктам)
 
 1. **Запись — только по кнопке.** Ни одна ветка `reg_list` не вызывает
-   `create_event`/`delete_event`/`exclude_occurrence`. Все эти
+   `create_event`/`delete_event`/`exclude_occurrence`/`update_event`. Все эти
    функции вызываются только из `handlers._perform_plan` после
    `plan_confirm`. В промпте это тоже зафиксировано («изменения НЕ выполняешь
    сам»).
@@ -1650,10 +1679,12 @@ result = await asyncio.to_thread(run_agent, message.from_user.id, text)
   или высчитывает по правилу повтора (например, «следующий понедельник») с
   учётом исключений «кроме …». Ошибка модели → `exclude` не найдёт дату и вернёт
   ошибку со списком возможных дат периода.
-- **`update_event` / `update_instance` в сервисе не используются агентом.**
-  Методы оставлены для совместимости; агент работает только через
-  `create_event` / `delete_event` / `exclude_occurrence`. При «изменении» дата
-  может «поехать» как два события (исключённое + новое).
+- **`update_event` в сервисе используется агентом** через `op="update"`
+  (`reg_list`): правит целый объект (одиночное событие или вся серия) с
+  сохранением UID.
+- **`update_instance` агентом не используется.** Изменение одного вхождения
+  серии выполняется как `exclude` + `add`; при этом дата может «поехать» как
+  два события (исключённое + новое).
 
 ---
 

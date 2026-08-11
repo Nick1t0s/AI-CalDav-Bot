@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from html import escape as esc
 
 from aiogram import F, Router
@@ -21,6 +22,7 @@ from caldav_service import (
     create_event,
     delete_event,
     exclude_occurrence,
+    update_event,
 )
 from confirmation import (
     PlanAction,
@@ -63,6 +65,13 @@ def _cancel_pending_plan(chat_id: int) -> None:
 
 
 # ---------- helpers ----------
+
+
+def _parse_dt(value: str) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=config.TZ)
+    return dt
 
 
 async def _safe_edit(message: Message, text: str, reply_markup=None) -> None:
@@ -206,6 +215,8 @@ def _perform_action(action: PlanAction) -> str:
         return _run_delete_action(action)
     if action.kind == "exclude":
         return _run_exclude_action(action)
+    if action.kind == "update":
+        return _run_update_action(action)
     return "❌ Неизвестное действие"
 
 
@@ -229,3 +240,18 @@ def _run_exclude_action(action: PlanAction) -> str:
     exclude_occurrence(ev)
     when = "весь день" if ev.all_day else f"{ev.start:%H:%M}"
     return f"✅ Исключено вхождение: «{esc(ev.summary)}» ({fmt_dtime(ev.start)}, {when})"
+
+
+def _run_update_action(action: PlanAction) -> str:
+    ev = action.event
+    changes = action.changes
+    update_event(ev, changes)
+    new_summary = changes.get("summary") or ev.summary
+    text = f"✅ Обновлено: «{esc(new_summary)}»"
+    if changes.get("start"):
+        new_start = _parse_dt(changes["start"])
+        when = "весь день" if changes.get("all_day") else f"{new_start:%H:%M}"
+        text += f" ({fmt_dtime(new_start)}, {when})"
+    elif changes.get("all_day"):
+        text += " (весь день)"
+    return text

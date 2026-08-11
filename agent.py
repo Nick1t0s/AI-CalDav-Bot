@@ -29,7 +29,7 @@ from icalendar import vRecur
 
 import config
 import caldav_service
-from caldav_service import EventData
+from caldav_service import EventData, RRULE_FREQS, WEEKDAY_CODES
 from confirmation import PlanAction
 from formatting import format_catalog_compact
 from asks import AskQ, consume_ask as consume_ask_op, register_ask as register_ask_op
@@ -64,7 +64,7 @@ def build_tools() -> list[dict]:
                 "name": "reg_list",
                 "description": (
                     "Зарегистрировать список изменений в план одним вызовом. Каждый элемент actions — "
-                    "объект с op='add' | 'delete' | 'exclude'. Исполнится после подтверждения пользователем."
+                    "объект с op='add' | 'delete' | 'exclude' | 'update'. Исполнится после подтверждения пользователем."
                 ),
                 "parameters": {
                     "type": "object",
@@ -78,11 +78,13 @@ def build_tools() -> list[dict]:
                                 "delete: ref (токен eN события/серии целиком, со скобками [eN] тоже принимается). "
                                 "exclude: ref (токен ПОВТОРЯЮЩЕЙСЯ серии) + date (YYYY-MM-DD) — внести одно вхождение "
                                 "в список исключений серии (удалить именно это вхождение, не трогая остальные). "
+                                "update: ref (токен eN события/серии целиком) + changes — правки ЦЕЛОГО объекта "
+                                "(одиночное событие или вся серия, UID сохраняется); см. описание changes. "
                             ),
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "op": {"type": "string", "enum": ["add", "delete", "exclude"]},
+                                    "op": {"type": "string", "enum": ["add", "delete", "exclude", "update"]},
                                     "summary": {"type": "string"},
                                     "start": {"type": "string"},
                                     "duration": {"type": "integer"},
@@ -98,6 +100,41 @@ def build_tools() -> list[dict]:
                                     "rrule": {"type": "string"},
                                     "ref": {"type": "string"},
                                     "date": {"type": "string", "description": "YYYY-MM-DD, дата вхождения серии для exclude"},
+                                    "changes": {
+                                        "type": "object",
+                                        "description": (
+                                            "для op='update': правки ЦЕЛОГО события/серии (UID сохраняется). "
+                                            "summary — новое название, start — новая дата YYYY-MM-DDTHH:MM:SS, "
+                                            "duration — минуты (для all_day — дни: 1440=1 день), "
+                                            "all_day — bool «весь день», location/description/link — новые значения "
+                                            "(пустая строка очищает), alarms — напоминания в минутах до начала, "
+                                            "categories — список, status/transp/priority — свойства, "
+                                            "rrule — полное правило повтора, либо freq/interval/byday/until/count — "
+                                            "частичные правки повтора. Одно вхождение серии НЕ обновляется через update "
+                                            "(для него используй exclude+add). При переносе недельной серии на другой "
+                                            "день недели BYDAY обновится автоматически."
+                                        ),
+                                        "properties": {
+                                            "summary": {"type": "string"},
+                                            "start": {"type": "string"},
+                                            "duration": {"type": "integer"},
+                                            "all_day": {"type": "boolean"},
+                                            "location": {"type": "string"},
+                                            "description": {"type": "string"},
+                                            "link": {"type": "string"},
+                                            "alarms": {"type": "array", "items": {"type": "integer"}},
+                                            "categories": {"type": "array", "items": {"type": "string"}},
+                                            "status": {"type": "string", "enum": ["CONFIRMED", "TENTATIVE", "CANCELLED"]},
+                                            "transp": {"type": "string", "enum": ["OPAQUE", "TRANSPARENT"]},
+                                            "priority": {"type": "integer"},
+                                            "rrule": {"type": "string"},
+                                            "freq": {"type": "string", "enum": ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"]},
+                                            "interval": {"type": "integer"},
+                                            "byday": {"type": "array", "items": {"type": "string"}},
+                                            "until": {"type": "string"},
+                                            "count": {"type": "integer"},
+                                        },
+                                    },
                                 },
                                 "required": ["op"],
                             },
@@ -187,11 +224,10 @@ get_period + ask_user) — они выполнятся в указанном п�
 «Юайти алгоритмы», не спрашивай; просто «юайти» — подходят оба, задай вопрос.
 5. Одноразовое событие и повторяющаяся серия с одинаковым названием — это РАЗНЫЕ события \
 (серии показаны в блоке «Серии» одной строкой, одиночные — в «Одиночные события»). \
-Удаление/изменение всегда работает с ЦЕЛЫМ событием или серией: delete удаляет весь объект \
-(одиночное событие или серию целиком). Удалить ОДНО вхождение серии можно только через exclude \
-(внести его дату в список исключений серии). Изменить что-либо (вхождение серии, всю серию или \
-одиночное событие) можно только как «удалить старое + создать новое»: для одного вхождения — \
-exclude (исключить дату) + add (создать новое событие), для целого объекта — delete + add.
+delete и update всегда работают с ЦЕЛЫМ объектом: delete удаляет весь объект (одиночное событие \
+или серию целиком), update изменяет весь объект (сохраняя его UID). ОДНО вхождение серии можно \
+только исключить/изменить через exclude + add: exclude (внести дату в список исключений серии) \
+и add (создать новое событие с нужными правками).
 6. НЕ планируй удаление/изменение нескольких событий за один ход, если пользователь явно не просил \
 несколько («удали оба», «перенеси обе тренировки» и т.п.). Все изменения одного хода — ОДНИМ \
 вызовом reg_list со списком actions. План накапливается и переживает паузу на ask_user: уже \
@@ -221,6 +257,11 @@ alarms: [60, 15, 5] (за час, 15 и 5 минут), если пользова
 10. Удаление (op="delete"): ref — токен события/серии целиком из каталога get_period. Удаление \
 всегда ЦЕЛОЕ: одиночное событие или вся серия. Одно вхождение серии — op="exclude" с ref серии и \
 date вхождения.
+10а. Обновление (op="update"): ref — токен события/серии целиком + changes — любые из полей \
+summary, start, duration, all_day, location, description, link, alarms, categories, status, \
+transp, priority, rrule (либо freq/interval/byday/until/count). Обновляется ТОЛЬКО целый объект \
+(одиночное событие или вся серия, UID сохраняется); одно вхождение серии — только exclude + add. \
+При переносе недельной серии на другой день недели правило повтора (BYDAY) обновится автоматически.
 11. ask_user: question — текст вопроса, options — 1–4 варианта ответа кнопками; пользователь может \
 и написать свой ответ. Уточняй ВСЕГДА, когда в запросе есть неопределённость (какое событие, какая \
 дата, одно вхождение или вся серия, какой период). Как можно чаще предлагай варианты ответа \
@@ -717,6 +758,98 @@ class CalendarAgent:
         ev = self._resolve_instance(obj, args.get("date"))
         return PlanAction(kind="exclude", event=ev)
 
+    @staticmethod
+    def _norm_changes(raw) -> dict:
+        """Валидация правок для op='update' (ключи совместимы с update_event)."""
+        if not isinstance(raw, dict):
+            raise ValueError("некорректный changes: нужен объект")
+        changes: dict = {}
+        if raw.get("summary") is not None:
+            changes["summary"] = str(raw["summary"]).strip()
+        if raw.get("start") is not None:
+            start_iso = str(raw["start"]).strip()
+            try:
+                _parse_dt(start_iso)
+            except ValueError:
+                raise ValueError("некорректный start. Используй формат YYYY-MM-DDTHH:MM:SS") from None
+            changes["start"] = start_iso
+        if raw.get("duration") is not None:
+            try:
+                duration = int(raw["duration"])
+            except (TypeError, ValueError):
+                raise ValueError("некорректный duration (минуты)") from None
+            if duration < 1:
+                raise ValueError("duration должен быть ≥ 1")
+            changes["duration"] = duration
+        if raw.get("all_day") is not None:
+            changes["all_day"] = bool(raw["all_day"])
+        for key in ("location", "description", "link"):
+            if raw.get(key) is not None:
+                changes[key] = str(raw[key])
+        if raw.get("alarms") is not None:
+            changes["alarms"] = _norm_alarms(raw["alarms"])
+        if raw.get("categories") is not None:
+            changes["categories"] = _norm_categories(raw["categories"])
+        for key, allowed in (("status", ("CONFIRMED", "TENTATIVE", "CANCELLED")), ("transp", ("OPAQUE", "TRANSPARENT"))):
+            if raw.get(key) is not None:
+                val = str(raw[key]).strip().upper()
+                if val not in allowed:
+                    raise ValueError(f"некорректный {key}: {val}")
+                changes[key] = val
+        if raw.get("priority") is not None:
+            changes["priority"] = _norm_priority(raw["priority"])
+        if raw.get("rrule"):
+            rrule = _normalize_rrule(raw["rrule"])
+            if rrule is None:
+                raise ValueError(f"некорректный rrule: {raw['rrule']}")
+            changes["rrule"] = rrule
+        if raw.get("freq"):
+            freq = str(raw["freq"]).strip().upper()
+            if freq not in RRULE_FREQS:
+                raise ValueError(f"некорректный freq: {freq}")
+            changes["freq"] = freq
+        if raw.get("interval") is not None:
+            try:
+                interval = int(raw["interval"])
+            except (TypeError, ValueError):
+                raise ValueError("некорректный interval") from None
+            if interval < 1:
+                raise ValueError("interval должен быть ≥ 1")
+            changes["interval"] = interval
+        if raw.get("byday") is not None:
+            days = [str(d).strip().upper() for d in raw["byday"]]
+            if not days or any(d not in WEEKDAY_CODES for d in days):
+                raise ValueError("некорректный byday: нужны коды MO..SU")
+            changes["byday"] = days
+        if raw.get("until") is not None:
+            until = str(raw["until"]).strip()
+            if until:
+                try:
+                    datetime.fromisoformat(until)
+                except ValueError:
+                    raise ValueError("некорректный until: нужен YYYY-MM-DD или YYYY-MM-DDTHH:MM:SS") from None
+            changes["until"] = until
+        if raw.get("count") is not None:
+            try:
+                count = int(raw["count"])
+            except (TypeError, ValueError):
+                raise ValueError("некорректный count") from None
+            if count < 1:
+                raise ValueError("count должен быть ≥ 1")
+            changes["count"] = count
+        return changes
+
+    def _build_update(self, chat_id: int, args: dict) -> PlanAction:
+        ref = (args.get("ref") or "").strip().strip("[]")
+        obj = self._session(chat_id)["refs"].get(ref)
+        if obj is None:
+            raise ValueError(f"неизвестный ref '{ref}'. Вызови get_period заново и используй свежие токены.")
+        ev = obj[0] if isinstance(obj, list) else obj
+        changes = self._norm_changes(args.get("changes"))
+        if not changes:
+            raise ValueError("для update нужен changes — хотя бы одно поле для изменения")
+        return PlanAction(kind="update", event=ev, changes=changes)
+
     def _tool_reg_list(self, chat_id: int, args: dict) -> str:
         actions = args.get("actions")
         if not isinstance(actions, list) or not actions:
@@ -735,6 +868,8 @@ class CalendarAgent:
                     action = self._build_delete(chat_id, act)
                 elif op == "exclude":
                     action = self._build_exclude(chat_id, act)
+                elif op == "update":
+                    action = self._build_update(chat_id, act)
                 else:
                     lines.append(f"{i}. ❌ неизвестный op: {op!r}")
                     continue
@@ -767,6 +902,8 @@ def _action_key(action: PlanAction) -> tuple:
         inst = getattr(ev, "instance_start", None)
         inst_date = inst.astimezone(config.TZ).date().isoformat() if inst else None
         return ("exclude", ev.url, inst_date)
+    if action.kind == "update":
+        return ("update", ev.url, json.dumps(action.changes, sort_keys=True, ensure_ascii=False, default=str))
     return (action.kind, ev.url)
 
 
@@ -781,6 +918,16 @@ def _action_label(action: PlanAction) -> str:
         inst = getattr(ev, "instance_start", None)
         when = inst.astimezone(config.TZ).strftime("%d.%m.%Y") if inst else ""
         return f"исключить вхождение «{ev.summary}» от {when}"
+    if action.kind == "update":
+        ch = action.changes
+        label = f"изменить «{ch.get('summary') or ev.summary}»"
+        if ch.get("start"):
+            try:
+                new_dt = _parse_dt(ch["start"]).astimezone(config.TZ)
+                label += f" на {new_dt:%d.%m.%Y %H:%M}"
+            except ValueError:
+                pass
+        return label
     return "неизвестное действие"
 
 
