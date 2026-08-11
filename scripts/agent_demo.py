@@ -1,6 +1,6 @@
 """CLI-харнес для проверки агента без Telegram.
 
-Запуск: .venv/bin/python agent_demo.py
+Запуск: .venv/bin/python -m scripts.agent_demo
 Каждая фраза — отдельная сессия (id = номер строки), чтобы не тащить контекст.
 """
 from __future__ import annotations
@@ -8,8 +8,8 @@ from __future__ import annotations
 import logging
 import sys
 
-import config
-from agent import AgentError, answer_ask, resume_agent, run_agent
+from app import config
+from app.agent import AgentError, answer_ask, resume_agent, run_agent
 
 
 def _setup_logging() -> None:

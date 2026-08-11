@@ -8,9 +8,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-import config
-from caldav_service import CalDAVError, get_client
-from handlers import router
+from app import config
+from app.caldav_service import CalDAVError, get_client
+from app.handlers import router
 
 
 async def main() -> None:

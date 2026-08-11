@@ -347,16 +347,20 @@ AI-CalDav-Bot/
 ├── .env                    # секреты и настройки (в gitignore)
 ├── .env.example            # образец .env с комментариями
 ├── requirements.txt        # зависимости Python
-├── config.py               # чтение .env → константы
-├── main.py                 # точка входа: запуск бота
-├── handlers.py             # Telegram I/O: обработчики сообщений и кнопок
-├── agent.py                # агент: инструменты, чат-цикл, сессии
-├── caldav_service.py       # CRUD поверх CalDAV (протокол и iCal)
-├── confirmation.py         # реестр планов + кнопка подтверждения
-├── asks.py                 # реестр вопросов + кнопки вариантов
-├── formatting.py           # рендер текстов (для модели и для человека)
-├── agent_demo.py           # CLI-песочница агента без Telegram
-├── check_connection.py     # проверка доступа к CalDAV
+├── app/                    # пакет приложения
+│   ├── __init__.py
+│   ├── config.py           # чтение .env → константы
+│   ├── main.py             # точка входа: запуск бота
+│   ├── handlers.py         # Telegram I/O: обработчики сообщений и кнопок
+│   ├── agent.py            # агент: инструменты, чат-цикл, сессии
+│   ├── caldav_service.py   # CRUD поверх CalDAV (протокол и iCal)
+│   ├── confirmation.py     # реестр планов + кнопка подтверждения
+│   ├── asks.py             # реестр вопросов + кнопки вариантов
+│   └── formatting.py       # рендер текстов (для модели и для человека)
+├── scripts/                # CLI-утилиты
+│   ├── __init__.py
+│   ├── agent_demo.py       # CLI-песочница агента без Telegram
+│   └── check_connection.py # проверка доступа к CalDAV
 └── struct.md               # этот документ
 ```
 
@@ -1493,7 +1497,7 @@ transp, priority, link` — ровно те ключи, которые клад�
   агента (номер варианта или текст), пока не будет `done`/`error`.
 - Печатает финальный текст, `items` и план (или «(план пуст)»).
 
-Запуск: `.venv/bin/python agent_demo.py`.
+Запуск: `.venv/bin/python -m scripts.agent_demo`.
 
 ## 6.10. `check_connection.py` — проверка доступа
 
@@ -1502,7 +1506,7 @@ transp, priority, link` — ровно те ключи, которые клад�
 - Печатает `principal.url`, имя календаря.
 - Читает события `[сегодня-1 день, сегодня+30 дней]` и печатает первые 5.
 
-Запуск: `.venv/bin/python check_connection.py`.
+Запуск: `.venv/bin/python -m scripts.check_connection`.
 
 ---
 

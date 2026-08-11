@@ -17,7 +17,7 @@ from icalendar import vRecur
 from icalendar.prop import vDDDLists
 import recurring_ical_events
 
-import config
+from app import config
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc

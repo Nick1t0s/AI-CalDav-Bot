@@ -12,7 +12,7 @@ from typing import Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from caldav_service import EventData
+from app.caldav_service import EventData
 
 CALLBACK_PREFIX = "op:"
 OP_TTL_SECONDS = 15 * 60

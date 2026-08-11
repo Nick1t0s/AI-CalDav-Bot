@@ -15,16 +15,16 @@ from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
-import config
-from agent import AgentError, append_assistant_text, run_agent
-from asks import cleanup_expired as cleanup_asks, kb_ask
-from caldav_service import (
+from app import config
+from app.agent import AgentError, append_assistant_text, run_agent
+from app.asks import cleanup_expired as cleanup_asks, kb_ask
+from app.caldav_service import (
     create_event,
     delete_event,
     exclude_occurrence,
     update_event,
 )
-from confirmation import (
+from app.confirmation import (
     PlanAction,
     PlanOp,
     cleanup_expired,
@@ -33,7 +33,7 @@ from confirmation import (
     register,
     kb_plan_confirm,
 )
-from formatting import (
+from app.formatting import (
     describe_rrule,
     format_ask,
     format_done,

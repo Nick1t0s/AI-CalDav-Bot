@@ -1,14 +1,14 @@
 """CLI-проверка доступа к CalDAV (Яндекс) до запуска бота.
 
-Запуск: python check_connection.py
+Запуск: python -m scripts.check_connection
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
 
-import config
-from caldav_service import CalDAVClient, CalDAVError
+from app import config
+from app.caldav_service import CalDAVClient, CalDAVError
 
 
 def main() -> None:

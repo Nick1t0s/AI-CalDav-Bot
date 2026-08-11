@@ -8,7 +8,7 @@ from typing import Optional
 
 from icalendar import vRecur
 
-import config
+from app import config
 
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 MONTHS_GEN = [

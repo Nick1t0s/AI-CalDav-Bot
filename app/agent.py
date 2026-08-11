@@ -27,12 +27,12 @@ from typing import Optional
 
 from icalendar import vRecur
 
-import config
-import caldav_service
-from caldav_service import EventData, RRULE_FREQS, WEEKDAY_CODES
-from confirmation import PlanAction
-from formatting import format_catalog_compact
-from asks import AskQ, consume_ask as consume_ask_op, register_ask as register_ask_op
+from app import config
+from app import caldav_service
+from app.caldav_service import EventData, RRULE_FREQS, WEEKDAY_CODES
+from app.confirmation import PlanAction
+from app.formatting import format_catalog_compact
+from app.asks import AskQ, consume_ask as consume_ask_op, register_ask as register_ask_op
 
 logger = logging.getLogger(__name__)
 

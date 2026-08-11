@@ -72,7 +72,7 @@ cp .env.example .env   # затем отредактируйте .env
 ### 4. Проверка доступа к Яндексу
 
 ```bash
-python check_connection.py
+python -m scripts.check_connection
 ```
 
 Должно показать календарь и количество событий.
@@ -80,13 +80,13 @@ python check_connection.py
 ## Запуск
 
 ```bash
-python main.py
+python -m app.main
 ```
 
 Проверка логики агента без Telegram:
 
 ```bash
-python agent_demo.py
+python -m scripts.agent_demo
 ```
 
 ## Как это работает
@@ -122,14 +122,18 @@ python agent_demo.py
 ```
 ├── .env.example          # шаблон конфигурации
 ├── requirements.txt
-├── config.py             # чтение .env
-├── main.py               # запуск aiogram
-├── agent.py              # агент: tools (get_period/reg_list/ask_user/done), чат-цикл, сессии
-├── handlers.py           # обработчики сообщений + подтверждение плана кнопкой
-├── caldav_service.py     # CRUD через caldav/icalendar
-├── confirmation.py       # PlanOp + клавиатура подтверждения
-├── asks.py               # реестр вопросов ask_user + кнопки вариантов
-├── formatting.py         # рендер каталога для модели и плана для пользователя
-├── agent_demo.py         # CLI-проверка агента без Telegram
-└── check_connection.py   # CLI-проверка доступа к Яндексу
+├── app/                  # пакет приложения
+│   ├── __init__.py
+│   ├── config.py         # чтение .env
+│   ├── main.py           # запуск aiogram (python -m app.main)
+│   ├── agent.py          # агент: tools (get_period/reg_list/ask_user/done), чат-цикл, сессии
+│   ├── handlers.py       # обработчики сообщений + подтверждение плана кнопкой
+│   ├── caldav_service.py # CRUD через caldav/icalendar
+│   ├── confirmation.py   # PlanOp + клавиатура подтверждения
+│   ├── asks.py           # реестр вопросов ask_user + кнопки вариантов
+│   └── formatting.py     # рендер каталога для модели и плана для пользователя
+├── scripts/              # CLI-утилиты
+│   ├── agent_demo.py     # проверка агента без Telegram (python -m scripts.agent_demo)
+│   └── check_connection.py  # проверка доступа к Яндексу (python -m scripts.check_connection)
+└── struct.md             # подробная структура проекта
 ```
