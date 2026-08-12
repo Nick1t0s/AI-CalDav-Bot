@@ -38,3 +38,10 @@ AGENT_MAX_STEPS: int = int(os.getenv("AGENT_MAX_STEPS", "8"))
 AGENT_SESSION_TTL_MIN: int = int(os.getenv("AGENT_SESSION_TTL_MIN", "30"))
 AGENT_HISTORY_LIMIT: int = int(os.getenv("AGENT_HISTORY_LIMIT", "30"))
 AGENT_CATALOG_LIMIT: int = int(os.getenv("AGENT_CATALOG_LIMIT", "50"))
+
+# STT (распознавание голосовых сообщений). Отдельный ключ/URL: основные провайдеры
+# (OpenRouter и др.), на которые может указывать OPENAI_BASE_URL, аудио не поддерживают.
+STT_API_KEY: str = os.getenv("STT_API_KEY", "")
+STT_BASE_URL: str = os.getenv("STT_BASE_URL", "https://api.openai.com/v1")
+STT_MODEL: str = os.getenv("STT_MODEL", "whisper-1")
+STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "ru")

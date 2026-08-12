@@ -24,6 +24,7 @@ from app.caldav_service import (
     exclude_occurrence,
     update_event,
 )
+from app.stt import STTError, transcribe_audio
 from app.confirmation import (
     PlanAction,
     PlanOp,
@@ -122,6 +123,40 @@ async def on_message(message: Message) -> None:
         return
     await message.bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
     _cancel_pending_plan(message.chat.id)
+    try:
+        result = await asyncio.to_thread(run_agent, message.from_user.id, text)
+    except AgentError as exc:
+        await message.answer(f"😕 Ошибка агента: {esc(str(exc))}")
+        return
+    await _handle_result(message, result)
+
+
+# ---------- голосовые сообщения ----------
+
+
+@router.message(F.voice)
+async def on_voice(message: Message) -> None:
+    if not await _check_allowed(message):
+        return
+    cleanup_expired()
+    cleanup_asks()
+    await message.bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
+    _cancel_pending_plan(message.chat.id)
+    try:
+        buf = await message.bot.download(message.voice)
+        data = buf.read()
+    except Exception as exc:
+        logger.exception("Ошибка скачивания голосового сообщения")
+        await message.answer(f"😕 Не удалось скачать голосовое: {esc(str(exc))}")
+        return
+    try:
+        text = await asyncio.to_thread(
+            transcribe_audio, data, message.voice.mime_type
+        )
+    except STTError as exc:
+        await message.answer(f"😕 Не удалось распознать голосовое: {esc(str(exc))}")
+        return
+    await message.answer(f"🍀 Распознано: «{esc(text)}»")
     try:
         result = await asyncio.to_thread(run_agent, message.from_user.id, text)
     except AgentError as exc:
