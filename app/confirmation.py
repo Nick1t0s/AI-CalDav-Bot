@@ -30,7 +30,6 @@ class PlanAction:
     kind: str  # "create" | "delete" | "exclude" | "update"
     event: Optional[EventData] = None  # delete/exclude/update
     payload: Optional[dict] = None  # create
-    scope: str = "single"  # delete/exclude: instance | all | single (не используется для серий)
     changes: Optional[dict] = None  # update: правки для целого события/серии
 
 

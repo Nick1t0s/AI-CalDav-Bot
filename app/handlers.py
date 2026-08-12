@@ -11,7 +11,7 @@ from datetime import datetime
 from html import escape as esc
 
 from aiogram import F, Router
-from aiogram.enums import ChatAction
+from aiogram.enums import ChatAction, ChatType
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
@@ -35,6 +35,7 @@ from app.confirmation import (
     kb_plan_confirm,
 )
 from app.formatting import (
+    chunk_html,
     describe_rrule,
     format_ask,
     format_done,
@@ -92,11 +93,20 @@ async def _check_allowed(message: Message) -> bool:
     return True
 
 
+async def _check_private(message: Message) -> bool:
+    if message.chat.type != ChatType.PRIVATE:
+        await message.answer("🤖 Бот работает только в личных сообщениях.")
+        return False
+    return True
+
+
 # ---------- команды ----------
 
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
+    if not await _check_private(message):
+        return
     if not await _check_allowed(message):
         return
     await message.answer(INTRO)
@@ -104,6 +114,8 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
+    if not await _check_private(message):
+        return
     if not await _check_allowed(message):
         return
     await message.answer(INTRO)
@@ -114,6 +126,8 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(F.text)
 async def on_message(message: Message) -> None:
+    if not await _check_private(message):
+        return
     if not await _check_allowed(message):
         return
     cleanup_expired()
@@ -136,6 +150,8 @@ async def on_message(message: Message) -> None:
 
 @router.message(F.voice)
 async def on_voice(message: Message) -> None:
+    if not await _check_private(message):
+        return
     if not await _check_allowed(message):
         return
     cleanup_expired()
@@ -156,7 +172,10 @@ async def on_voice(message: Message) -> None:
     except STTError as exc:
         await message.answer(f"😕 Не удалось распознать голосовое: {esc(str(exc))}")
         return
-    await message.answer(f"🍀 Распознано: «{esc(text)}»")
+    echo = f"🍀 Распознано: «{esc(text)}»"
+    if len(echo) > 4000:
+        echo = echo[:3997] + "…"
+    await message.answer(echo)
     try:
         result = await asyncio.to_thread(run_agent, message.from_user.id, text)
     except AgentError as exc:
@@ -174,7 +193,8 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
         return
     if result.kind == "ask":
         for q in result.questions:
-            await message.answer(format_ask(q["question"]), reply_markup=kb_ask(q["options"]))
+            markup = kb_ask(q["options"]) or ReplyKeyboardRemove()
+            await message.answer(format_ask(q["question"]), reply_markup=markup)
         return
     if result.plan:
         op = PlanOp(user_id=user_id, actions=result.plan)
@@ -182,9 +202,20 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
         _PENDING_PLANS[message.chat.id] = op_id
         content = format_done(result.text, result.items)
         content += "\n\n" + format_plan(result.plan)
-        await message.answer(content, reply_markup=kb_plan_confirm(op_id))
+        chunks = chunk_html(content)
+        for chunk in chunks[:-1]:
+            await message.answer(chunk)
+        last = chunks[-1]
+        try:
+            msg = await message.answer(last, reply_markup=ReplyKeyboardRemove())
+            await msg.edit_reply_markup(reply_markup=kb_plan_confirm(op_id))
+        except Exception:
+            await message.answer(last, reply_markup=kb_plan_confirm(op_id))
     else:
-        await message.answer(format_done(result.text or "🤷 Не понял, что сделать.", result.items), reply_markup=ReplyKeyboardRemove())
+        chunks = chunk_html(format_done(result.text or "🤷 Не понял, что сделать.", result.items))
+        for i, chunk in enumerate(chunks):
+            markup = ReplyKeyboardRemove() if i == 0 else None
+            await message.answer(chunk, reply_markup=markup)
 
 
 # ---------- callback ----------
@@ -193,6 +224,9 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
 @router.callback_query(F.data.startswith("op:"))
 async def on_callback(cb: CallbackQuery) -> None:
     cleanup_expired()
+    if cb.message.chat.type != ChatType.PRIVATE:
+        await cb.answer("Бот работает только в личных сообщениях.", show_alert=True)
+        return
     parts = cb.data.split(":")
     if len(parts) < 3:
         await cb.answer()
@@ -222,7 +256,10 @@ async def on_callback(cb: CallbackQuery) -> None:
         results = await asyncio.to_thread(_perform_plan, op)
         text = "\n".join(results)
         append_assistant_text(cb.from_user.id, text)
-        await _safe_edit(cb.message, text)
+        chunks = chunk_html(text) or ["—"]
+        await _safe_edit(cb.message, chunks[0])
+        for chunk in chunks[1:]:
+            await cb.message.answer(chunk)
         await cb.answer()
         return
 
@@ -257,7 +294,11 @@ def _perform_action(action: PlanAction) -> str:
 
 def _run_create_action(payload: dict) -> str:
     created = create_event(**payload)
-    when = "весь день" if created.all_day else f"{created.start:%H:%M}"
+    if created.all_day:
+        days = max(1, created.duration.days)
+        when = "весь день" if days == 1 else f"весь день ({days} дн.)"
+    else:
+        when = f"{created.start:%H:%M}"
     text = f"✅ Создано: «{esc(created.summary)}» ({fmt_dtime(created.start)}, {when})"
     if created.is_recurring:
         text += f" 🔁 {describe_rrule(created.rrule)}"
@@ -283,10 +324,20 @@ def _run_update_action(action: PlanAction) -> str:
     update_event(ev, changes)
     new_summary = changes.get("summary") or ev.summary
     text = f"✅ Обновлено: «{esc(new_summary)}»"
+    eff_day = _effective_all_day(ev, changes)
     if changes.get("start"):
         new_start = _parse_dt(changes["start"])
-        when = "весь день" if changes.get("all_day") else f"{new_start:%H:%M}"
+        when = "весь день" if eff_day else f"{new_start:%H:%M}"
         text += f" ({fmt_dtime(new_start)}, {when})"
-    elif changes.get("all_day"):
+    elif eff_day:
         text += " (весь день)"
     return text
+
+
+def _effective_all_day(ev, changes: dict) -> bool:
+    """Режим «весь день» после правок (с учётом авто-конвертации update_event)."""
+    if changes.get("all_day") is not None:
+        return bool(changes["all_day"])
+    if ev.all_day and changes.get("duration") is not None:
+        return int(changes["duration"]) % 1440 == 0
+    return ev.all_day

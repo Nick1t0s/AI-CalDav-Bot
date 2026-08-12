@@ -268,17 +268,25 @@ Discovery: `_find_principal` (`CALDAV_PRINCIPAL_PATH` или `client.principal()
   alarms, categories, status, transp, priority, link) -> EventData`;
 - `delete_event(ev)` — удаление всего ресурса по `ev.url`;
 - `exclude_occurrence(ev)` — добавить `EXDATE` в мастер (нужен `ev.instance_start`);
-- `update_event(ev, changes)` — правка мастер-события (UID сохраняется);
-- `update_instance(ev, changes)` — detached VEVENT с `RECURRENCE-ID`;
-  **агентом не используется** (для одного вхождения агент делает exclude+add),
-  оставлен для совместимости.
+- `update_event(ev, changes)` — правка мастер-события (UID сохраняется). Для
+  одного вхождения серии агент использует `exclude` + `add`, поэтому
+  `update_instance` (detached VEVENT) удалён как мёртвый код.
 
 Вспомогательные (часто правимые при работе с датами):
-`_ensure_aware`, `_parse_dt`, `_norm`, `_as_dt`, `_is_all_day`, `_replace_prop`,
+`_ensure_aware`, `_parse_dt`, `_norm`, `_as_dt`, `_is_all_day`,
+`_to_all_day_duration` (минуты → целые дни, мин. 1 день), `_replace_prop`,
 `_get_alarms` / `_set_alarms` (VALARM), `_patch_rrule` (частичная правка RRULE:
 freq/interval/byday/until/count), `_align_weekly_byday` (перенос недельной серии
-на другой день недели → автообновление BYDAY), `_add_rdate`, `_restore_exdate`,
-`_drop_prop`, `_set_start` (DTSTART/DTEND с учётом all_day/UTC), `_duration_of`.
+на другой день недели → автообновление BYDAY), `_drop_prop`, `_set_start`
+(DTSTART/DTEND с учётом all_day/UTC), `_duration_of`.
+
+**Единицы длительности (важно):** для **создания** (`add`) события «весь день»
+`duration` задаётся в **днях** (1 = 1 день, по умолчанию 1; `agent._build_add`);
+остальные события — в минутах. Для **обновления** (`update`) `duration` — минуты:
+у вседневного мастера без явного флага `all_day` значение, не кратное 1440,
+трактуется как «снять весь день» (событие становится timed на N минут); кратное
+1440 — остаётся «весь день» на N//1440 дня. Такой же расчёт выполняет
+`formatting._eff_all_day` для превью.
 
 Константы: `RRULE_FREQS`, `WEEKDAY_CODES`, `UTC`.
 
@@ -301,7 +309,7 @@ freq/interval/byday/until/count), `_align_weekly_byday` (перенос неде
 
 - `ASK_TTL_SECONDS = 15*60`.
 - Dataclass `AskQ(user_id, tool_call_id, question, options)`.
-- Реестр: `register_ask`, `get_ask`, `consume_ask`, `cleanup_expired`.
+- Реестр: `register_ask`, `consume_ask`, `cleanup_expired`.
 - `kb_ask(options) -> ReplyKeyboardMarkup | None` — **reply-клавиатура**
   (кнопки по 2 в ряд, максимум 40 символов на кнопку, `one_time_keyboard=True`).
   Нажатие отправляет текст кнопки как обычное сообщение (путь через `on_message`).
@@ -354,9 +362,9 @@ freq/interval/byday/until/count), `_align_weekly_byday` (перенос неде
 
 Поля: `url` (URL мастера), `uid`, `summary`, `location`, `description`,
 `start`, `end`, `all_day`, `is_recurring`, `instance_start` (только для вхождения
-серии), `rrule` (сырая строка), `series_count`, `series_first`, `series_last`,
-`exdates` (локальные date), `rdates`, `alarms` (минуты до начала), `categories`,
-`status`, `transp`, `priority`, `link`. Свойство `duration = end - start`.
+серии), `rrule` (сырая строка), `exdates` (локальные date), `rdates`, `alarms`
+(минуты до начала), `categories`, `status`, `transp`, `priority`, `link`.
+Свойство `duration = end - start`.
 
 **Инварианты:**
 - Одна мастер-серия даёт МНОГО `EventData` (по вхождению) с одинаковыми `url`,
@@ -425,8 +433,8 @@ PlanAction).
   заполнение в `_to_event_data` / `create_event`; рендер в `formatting.describe_event`/
   `format_catalog_compact`; создание/правка в `create_event`/`update_event`.
 - **Изменить работу с RRULE/EXDATE/RDATE/сериями** → caldav_service.py:
-  `_patch_rrule`, `_align_weekly_byday`, `_add_rdate`, `_restore_exdate`,
-  `exclude_occurrence`, `update_event`; промпт `agent.py` (правила 7–8).
+  `_patch_rrule`, `_align_weekly_byday`, `exclude_occurrence`, `update_event`;
+  промпт `agent.py` (правила 7–8).
 - **Изменить подтверждение плана (кнопки, TTL, текст)** → confirmation.py
   (`kb_plan_confirm`, `OP_TTL_SECONDS`) + handlers.py `on_callback` +
   formatting.py `format_plan`/`_plan_action_line`.
@@ -478,9 +486,9 @@ PlanAction).
    обязаны проходить через `esc()` (html). Забыл — возможна «инъекция» в разметку.
 9. **`scope` в PlanAction не используется** (оставлен для совместимости) — см.
    `confirmation.py` и `struct.md` 4.2.
-10. **`update_instance` агентом не вызывается** — для одного вхождения серии
-    агент формирует `exclude` + `add`. Если добавишь вызов `update_instance`,
-    проверь, что агент действительно его использует (иначе мёртвый код).
+10. **Одиночное вхождение серии = `exclude` + `add`** — для одного вхождения
+    агент не правит detached VEVENT (`update_instance` удалён как мёртвый код):
+    он добавляет `EXDATE` в мастер (`exclude`) и создаёт отдельное VEVENT (`add`).
 11. **Ключ сессии агента = `message.from_user.id`**, а не `chat.id` (см.
     handlers.on_message и agent.run). Для приватных чатов совпадает, но не
     полагайся на это в коде.

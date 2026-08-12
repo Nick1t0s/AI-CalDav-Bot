@@ -42,9 +42,6 @@ class EventData:
     is_recurring: bool
     instance_start: Optional[datetime] = None
     rrule: Optional[str] = None  # сырая RRULE мастер-события (для серий)
-    series_count: int = 1  # сколько вхождений серии в запрошенном периоде
-    series_first: Optional[datetime] = None
-    series_last: Optional[datetime] = None
     exdates: list = field(default_factory=list)  # исключённые даты мастера (локальные date)
     rdates: list = field(default_factory=list)  # внеплановые вхождения (локальные datetime)
     alarms: list = field(default_factory=list)  # напоминания: минуты до начала
@@ -91,6 +88,11 @@ def _as_dt(value) -> datetime:
 
 def _is_all_day(value) -> bool:
     return isinstance(value, date) and not isinstance(value, datetime)
+
+
+def _to_all_day_duration(minutes: int) -> timedelta:
+    """Длительность all-day события в днях из минут (мин. 1 день)."""
+    return timedelta(days=max(1, round(minutes / 1440)))
 
 
 def _replace_prop(vevent: icalendar.Event, key: str, value) -> None:
@@ -271,44 +273,6 @@ def _align_weekly_byday(vevent: icalendar.Event, changes: dict, new_start: datet
     changes = dict(changes)
     changes["byday"] = [target]
     return changes
-
-
-def _add_rdate(vevent: icalendar.Event, value: str) -> None:
-    """Добавить внеплановое вхождение серии (RDATE)."""
-    try:
-        dt = _parse_dt(value).astimezone(UTC)
-    except ValueError:
-        raise CalDAVError(f"некорректный add_occurrence: {value!r}") from None
-    existing = vevent.get("RDATE")
-    values: list = []
-    if existing is not None:
-        for prop in existing if isinstance(existing, list) else [existing]:
-            values.extend(p.dt for p in prop.dts)
-    values.append(dt)
-    values = list(dict.fromkeys(values))
-    _replace_prop(vevent, "RDATE", vDDDLists(values))
-
-
-def _restore_exdate(vevent: icalendar.Event, value: str) -> None:
-    """Убрать дату из EXDATE (вернуть исключённое вхождение серии)."""
-    try:
-        target = date.fromisoformat(str(value).strip())
-    except ValueError:
-        raise CalDAVError(f"некорректный restore_occurrence: {value!r}") from None
-    existing = vevent.get("EXDATE")
-    if existing is None:
-        return
-    keep: list = []
-    for prop in existing if isinstance(existing, list) else [existing]:
-        for d in prop.dts:
-            dt = d.dt
-            if _is_all_day(dt):
-                ddate = dt
-            else:
-                ddate = _ensure_aware(dt).astimezone(config.TZ).date()
-            if ddate != target:
-                keep.append(dt)
-    _replace_prop(vevent, "EXDATE", vDDDLists(keep)) if keep else _drop_prop(vevent, "EXDATE")
 
 
 def _drop_prop(vevent: icalendar.Event, key: str) -> None:
@@ -503,9 +467,9 @@ class CalDAVClient:
         event.add("dtstamp", datetime.now(UTC))
         if all_day:
             start_date = _ensure_aware(start).astimezone(config.TZ).date()
-            days = max(1, round(duration.total_seconds() / 86400))
+            days = _to_all_day_duration(int(duration.total_seconds() // 60))
             event.add("dtstart", start_date)
-            event.add("dtend", start_date + timedelta(days=days))
+            event.add("dtend", start_date + timedelta(days=days.days))
         else:
             start_utc = _ensure_aware(start).astimezone(UTC)
             end_utc = start_utc + duration
@@ -530,14 +494,23 @@ class CalDAVClient:
                 return self._to_event_data(_get_vevent(created.icalendar_instance), created, bool(rrule), rrule)
             except Exception:
                 pass
+        start_dt = _ensure_aware(start).astimezone(config.TZ)
+        if all_day:
+            days = _to_all_day_duration(int(duration.total_seconds() // 60)).days
+            fb_start = datetime.combine(start_dt.date(), time.min, tzinfo=config.TZ)
+            fb_end = datetime.combine(start_dt.date() + timedelta(days=days), time.min, tzinfo=config.TZ)
+        else:
+            start_utc = start_dt.astimezone(UTC)
+            fb_start = _norm(start_utc)
+            fb_end = _norm(start_utc + duration)
         return EventData(
             url="",
             uid=str(event.get("UID") or ""),
             summary=summary,
             location=location or "",
             description=description or "",
-            start=_norm(_ensure_aware(start)) if not all_day else _ensure_aware(start).astimezone(config.TZ),
-            end=_norm(_ensure_aware(start) + duration) if not all_day else _ensure_aware(start).astimezone(config.TZ),
+            start=fb_start,
+            end=fb_end,
             all_day=all_day,
             is_recurring=bool(rrule),
             rrule=rrule,
@@ -633,25 +606,41 @@ class CalDAVClient:
                 new_start = old_start
                 if changes.get("start"):
                     new_start = _parse_dt(changes["start"])
-                elif changes.get("shift_minutes"):
-                    new_start = old_start + timedelta(minutes=int(changes["shift_minutes"]))
-                new_duration = (
-                    timedelta(minutes=int(changes["duration"]))
-                    if changes.get("duration")
-                    else old_duration
-                )
-                if "all_day" in changes and bool(changes["all_day"]) and not all_day:
+                new_duration = old_duration
+
+                # Разрешение all_day/длительности.
+                #
+                # Авто-конвертация: у all-day мастера без явного флага all_day
+                # длительность в минутах, не кратная суткам, означает «снять
+                # весь день» (timed-событие на N минут). Кратная 1440 — остаётся
+                # «весь день» на N//1440 дня.
+                explicit_all_day = "all_day" in changes
+                if explicit_all_day and bool(changes["all_day"]) and not all_day:
                     new_all_day = True
-                    if changes.get("duration"):
-                        new_duration = timedelta(days=max(1, round(int(changes["duration"]) / 1440)))
+                    if changes.get("duration") is not None:
+                        new_duration = _to_all_day_duration(int(changes["duration"]))
                     else:
                         new_duration = timedelta(days=1)
-                elif "all_day" in changes and not bool(changes["all_day"]) and all_day:
+                elif explicit_all_day and not bool(changes["all_day"]):
                     new_all_day = False
-                    if not changes.get("duration"):
+                    if changes.get("duration"):
+                        new_duration = timedelta(minutes=int(changes["duration"]))
+                    elif all_day:
                         new_duration = timedelta(minutes=old_duration.days * 1440)
+                elif all_day and changes.get("duration") is not None:
+                    minutes = int(changes["duration"])
+                    if minutes % 1440 == 0:
+                        new_all_day = True
+                        new_duration = _to_all_day_duration(minutes)
+                    else:
+                        new_all_day = False
+                        new_duration = timedelta(minutes=minutes)
                 else:
                     new_all_day = all_day
+                    if all_day and changes.get("duration") is not None:
+                        new_duration = _to_all_day_duration(int(changes["duration"]))
+                    elif changes.get("duration"):
+                        new_duration = timedelta(minutes=int(changes["duration"]))
 
                 aligned = _align_weekly_byday(vevent, changes, new_start)
                 if aligned is not None:
@@ -705,10 +694,6 @@ class CalDAVClient:
 
                 if any(k in changes for k in ("rrule", "until", "count", "freq", "interval", "byday")):
                     _patch_rrule(vevent, changes)
-                if changes.get("add_occurrence"):
-                    _add_rdate(vevent, changes["add_occurrence"])
-                if changes.get("restore_occurrence"):
-                    _restore_exdate(vevent, changes["restore_occurrence"])
 
                 self._set_start(vevent, new_start, new_duration, new_all_day)
 
@@ -718,89 +703,6 @@ class CalDAVClient:
             raise
         except Exception as exc:
             raise CalDAVError(f"Не удалось изменить событие: {exc}") from exc
-
-    def update_instance(self, ev: EventData, changes: dict) -> None:
-        """Изменить одно вхождение серии: detached VEVENT с RECURRENCE-ID."""
-        if ev.instance_start is None:
-            raise CalDAVError("Не указано вхождение для изменения")
-        try:
-            with self._lock:
-                target = self.calendar.event_by_url(ev.url)
-                cal = target.icalendar_instance
-                master = _get_vevent(cal)
-
-                try:
-                    raw_master_start = master.decoded("DTSTART")
-                except Exception:
-                    raw_master_start = None
-                master_all_day = raw_master_start is not None and _is_all_day(raw_master_start)
-                try:
-                    master_tz = raw_master_start.tzinfo or UTC
-                except Exception:
-                    master_tz = UTC
-                inst_start = ev.instance_start.astimezone(master_tz) if not master_all_day else ev.instance_start.astimezone(config.TZ)
-
-                new_start = inst_start
-                if changes.get("start"):
-                    new_start = _parse_dt(changes["start"])
-                    if master_all_day:
-                        new_start = new_start.astimezone(config.TZ)
-                    else:
-                        new_start = new_start.astimezone(master_tz)
-                elif changes.get("shift_minutes"):
-                    new_start = inst_start + timedelta(minutes=int(changes["shift_minutes"]))
-                new_duration = (
-                    timedelta(minutes=int(changes["duration"]))
-                    if changes.get("duration")
-                    else ev.duration
-                )
-
-                det = icalendar.Event()
-                det.add("uid", str(master.get("UID") or ev.uid))
-                det.add("dtstamp", datetime.now(UTC))
-                seq = master.get("SEQUENCE")
-                det.add("sequence", (int(seq) if seq is not None else 0) + 1)
-                if master_all_day:
-                    det.add("recurrence-id", inst_start.date())
-                    det.add("dtstart", new_start.date())
-                    det.add("dtend", new_start.date() + timedelta(days=max(1, round(new_duration.total_seconds() / 86400))))
-                else:
-                    det.add("recurrence-id", inst_start)
-                    det.add("dtstart", new_start)
-                    det.add("dtend", new_start + new_duration)
-                det.add("summary", changes.get("summary") or str(master.get("SUMMARY") or ev.summary))
-
-                loc = changes["location"] if changes.get("location") is not None else ev.location
-                if loc:
-                    det.add("location", loc)
-                desc = changes["description"] if changes.get("description") is not None else ev.description
-                if desc:
-                    det.add("description", desc)
-                cats = changes["categories"] if changes.get("categories") is not None else ev.categories
-                if cats:
-                    det.add("categories", _parse_categories(cats))
-                status = changes["status"] if changes.get("status") is not None else (ev.status or "")
-                if status:
-                    det.add("status", str(status).upper())
-                transp = changes["transp"] if changes.get("transp") is not None else (ev.transp or "")
-                if transp:
-                    det.add("transp", str(transp).upper())
-                priority = changes["priority"] if changes.get("priority") is not None else ev.priority
-                if priority is not None:
-                    det.add("priority", int(priority))
-                link = changes["link"] if changes.get("link") is not None else ev.link
-                if link:
-                    det.add("url", str(link))
-                alarms = changes["alarms"] if changes.get("alarms") is not None else ev.alarms
-                _set_alarms(det, alarms)
-
-                cal.add_component(det)
-                target.data = cal.to_ical()
-                target.save()
-        except CalDAVError:
-            raise
-        except Exception as exc:
-            raise CalDAVError(f"Не удалось изменить вхождение: {exc}") from exc
 
     @staticmethod
     def _duration_of(vevent, raw_start, all_day: bool) -> timedelta:
@@ -888,7 +790,3 @@ def exclude_occurrence(ev: EventData) -> None:
 
 def update_event(ev: EventData, changes: dict) -> None:
     get_client().update_event(ev, changes)
-
-
-def update_instance(ev: EventData, changes: dict) -> None:
-    get_client().update_instance(ev, changes)

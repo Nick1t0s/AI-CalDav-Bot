@@ -48,6 +48,58 @@ def fmt_dtime(dt: datetime) -> str:
     return fmt_date(dt.date())
 
 
+def _eff_all_day(ev, changes: dict) -> bool:
+    """Фактический режим «весь день» после применения правок update.
+
+    Повторяет логику caldav_service.update_event (в т.ч. авто-конвертацию
+    вседневного события в timed при длительности в минутах, не кратной 1440).
+    """
+    if changes.get("all_day") is not None:
+        return bool(changes["all_day"])
+    if getattr(ev, "all_day", False) and changes.get("duration") is not None:
+        return int(changes["duration"]) % 1440 == 0
+    return bool(getattr(ev, "all_day", False))
+
+
+def chunk_html(text: str, limit: int = 4000) -> list[str]:
+    """Разбить HTML-текст на части ≤ limit, не разрезая теги и не ломая разметку."""
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    tokens = re.split(r"(<[^>]+>)", text)
+    chunks: list[str] = []
+    current = ""
+    for token in tokens:
+        if not token:
+            continue
+        if len(current) + len(token) <= limit:
+            current += token
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if len(token) <= limit:
+            current = token
+        else:
+            for i in range(0, len(token), limit):
+                chunks.append(token[i : i + limit])
+    if current:
+        chunks.append(current)
+    return [_balance_html(c) for c in chunks]
+
+
+def _balance_html(chunk: str) -> str:
+    """Дозакрыть незакрытые теги <b>/<i> (на случай разреза посреди жирного текста)."""
+    delta = chunk.count("<b>") - chunk.count("</b>")
+    if delta > 0:
+        chunk += "</b>" * delta
+    delta = chunk.count("<i>") - chunk.count("</i>")
+    if delta > 0:
+        chunk += "</i>" * delta
+    return chunk
+
+
 def _parse_byday(items) -> tuple[list[int], dict[int, int]]:
     """BYDAY → (дни недели, {день: порядковый номер})."""
     days: list[int] = []
@@ -286,7 +338,9 @@ def _plan_action_line(a) -> str:
         p = a.payload
         start = p["start"].astimezone(config.TZ)
         if p.get("all_day"):
-            line = f"✨ Создать <b>«{esc(p['summary'])}»</b> — {fmt_date(start.date())}, весь день"
+            days = max(1, round(p["duration"].total_seconds() / 86400))
+            label = "" if days == 1 else f" ({days} дн.)"
+            line = f"✨ Создать <b>«{esc(p['summary'])}»</b> — {fmt_date(start.date())}, весь день{label}"
         else:
             end = start + p["duration"]
             line = f"✨ Создать <b>«{esc(p['summary'])}»</b> — {fmt_date(start.date())}, {start:%H:%M}–{end:%H:%M}"
@@ -312,15 +366,16 @@ def _plan_action_line(a) -> str:
     if a.kind == "update":
         ch = a.changes
         line = f"✏️ Изменить <b>«{esc(ch.get('summary') or ev.summary)}»</b>"
+        eff_day = _eff_all_day(ev, ch)
         bits: list[str] = []
         if ch.get("start"):
             new_start = _parse_dt(ch["start"])
-            when = "весь день" if ch.get("all_day") else f"{new_start:%H:%M}"
+            when = "весь день" if eff_day else f"{new_start:%H:%M}"
             bits.append(f"начало → {fmt_dtime(new_start)}, {when}")
         if ch.get("duration") is not None:
             d = int(ch["duration"])
-            if ch.get("all_day"):
-                days = d // 1440
+            if eff_day:
+                days = max(1, round(d / 1440))
                 bits.append("длительность → 1 день" if days == 1 else f"длительность → {days} дн.")
             else:
                 bits.append(f"длительность → {d} мин")

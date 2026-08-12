@@ -40,10 +40,6 @@ def register_ask(q: AskQ) -> str:
     return ask_id
 
 
-def get_ask(ask_id: str) -> Optional[AskQ]:
-    return PENDING.get(ask_id)
-
-
 def consume_ask(ask_id: str) -> Optional[AskQ]:
     _CREATED_AT.pop(ask_id, None)
     return PENDING.pop(ask_id, None)

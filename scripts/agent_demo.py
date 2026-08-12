@@ -53,7 +53,7 @@ def main() -> None:
         if result.plan:
             print(f"--- план ({len(result.plan)} действий) ---")
             for a in result.plan:
-                print(f"  {a.kind} | scope={a.scope} | event={getattr(a.event, 'summary', None) if a.event else None} | payload={a.payload}")
+                print(f"  {a.kind} | event={getattr(a.event, 'summary', None) if a.event else None} | payload={a.payload}")
         else:
             print("(план пуст)")
 

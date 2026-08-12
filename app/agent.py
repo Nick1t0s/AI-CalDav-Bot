@@ -73,7 +73,7 @@ def build_tools() -> list[dict]:
                             "type": "array",
                             "description": (
                                 "add: summary + start (YYYY-MM-DDTHH:MM:SS), duration в минутах (по умолчанию 60), "
-                                "location, description, link (URL), all_day (событие «весь день», duration в днях: 1440=1 день), "
+                                "location, description, link (URL), all_day (событие «весь день», duration в днях: 1 = 1 день, по умолчанию 1), "
                                 "alarms (напоминания: минуты до начала, по умолчанию [60, 15, 5]), categories, status, transp, priority, rrule. "
                                 "delete: ref (токен eN события/серии целиком, со скобками [eN] тоже принимается). "
                                 "exclude: ref (токен ПОВТОРЯЮЩЕЙСЯ серии) + date (YYYY-MM-DD) — внести одно вхождение "
@@ -105,7 +105,9 @@ def build_tools() -> list[dict]:
                                         "description": (
                                             "для op='update': правки ЦЕЛОГО события/серии (UID сохраняется). "
                                             "summary — новое название, start — новая дата YYYY-MM-DDTHH:MM:SS, "
-                                            "duration — минуты (для all_day — дни: 1440=1 день), "
+                                            "duration — минуты; для события «весь день»: кратное 1440 (1440 = 1 день) "
+                                            "сохраняет «весь день», не кратное — превращает в обычное событие "
+                                            "на это число минут, "
                                             "all_day — bool «весь день», location/description/link — новые значения "
                                             "(пустая строка очищает), alarms — напоминания в минутах до начала, "
                                             "categories — список, status/transp/priority — свойства, "
@@ -254,7 +256,7 @@ ask_user (question: «Удалить одно вхождение или всю �
 FREQ=WEEKLY;BYDAY=MO, «по будням» → FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR, «каждый день» → FREQ=DAILY. \
 Для недельного повтора день недели в start обязан совпадать с BYDAY: если дата не указана, возьми \
 ближайший от сегодня подходящий день (например, для BYDAY=TU при сегодняшней пятнице — следующий \
-вторник). Событие «весь день»: all_day: true и duration в днях (1440 = 1 день). Дополнительно можно \
+вторник). Событие «весь день»: all_day: true и duration в днях (по умолчанию 1). Дополнительно можно \
 передать: location, description, link (URL), categories (список), status (CONFIRMED/TENTATIVE/CANCELLED), \
 transp (OPAQUE — занят / TRANSPARENT — свободен), priority (1–9).
 9а. Напоминания (alarms — минуты до начала): для создаваемых событий по умолчанию указывай \
@@ -267,7 +269,10 @@ date вхождения.
 summary, start, duration, all_day, location, description, link, alarms, categories, status, \
 transp, priority, rrule (либо freq/interval/byday/until/count). Обновляется ТОЛЬКО целый объект \
 (одиночное событие или вся серия, UID сохраняется); одно вхождение серии — только exclude + add. \
-При переносе недельной серии на другой день недели правило повтора (BYDAY) обновится автоматически.
+При переносе недельной серии на другой день недели правило повтора (BYDAY) обновится автоматически. \
+Чтобы «снять весь день» у вседневного события — обязательно укажи all_day: false и время в start. \
+Если у вседневного события задаёшь длительность в минутах (например, 90) — бот сам превратит \
+его в событие по времени; для сохранения «всего дня» используй длительность, кратную 1440.
 11. ask_user: question — текст вопроса, options — 1–4 варианта ответа кнопками; пользователь может \
 и написать свой ответ. Уточняй ВСЕГДА, когда в запросе есть неопределённость (какое событие, какая \
 дата, одно вхождение или вся серия, какой период). Как можно чаще предлагай варианты ответа \
@@ -438,14 +443,6 @@ class CalendarAgent:
     def append_assistant_text(self, chat_id: int, text: str) -> None:
         with self._chat_lock(chat_id):
             self._append(chat_id, {"role": "assistant", "content": text})
-
-    def has_pending_asks(self, chat_id: int) -> bool:
-        with self._chat_lock(chat_id):
-            with self._lock:
-                sess = self._sessions.get(chat_id)
-            if not sess:
-                return False
-            return any(not q["answered"] for q in sess["pending_asks"])
 
     # ---------- LLM ----------
 
@@ -672,7 +669,13 @@ class CalendarAgent:
     def _tool_get_period(self, chat_id: int, args: dict) -> str:
         if not args.get("date_from") or not args.get("date_to"):
             return "Ошибка: get_period требует date_from и date_to (YYYY-MM-DD)."
-        start, end = _resolve_period(args)
+        try:
+            start, end = _resolve_period(args)
+        except (ValueError, TypeError):
+            return "Ошибка: некорректная дата. Используй формат YYYY-MM-DD и вызови get_period повторно."
+        if start >= end:
+            return "Ошибка: date_from не раньше date_to — период пуст или инвертирован. " \
+                   "Укажи date_from ≤ date_to (YYYY-MM-DD) и вызови get_period повторно."
         try:
             events = caldav_service.list_events(start, end)
         except caldav_service.CalDAVError as exc:
@@ -697,9 +700,15 @@ class CalendarAgent:
         except ValueError:
             raise ValueError("некорректный start. Используй формат YYYY-MM-DDTHH:MM:SS") from None
         try:
-            duration = max(1, int(args.get("duration") or 60))
+            duration_val = int(args.get("duration") or 0)
         except (TypeError, ValueError):
-            raise ValueError("некорректный duration (минуты)") from None
+            raise ValueError("некорректный duration (минуты для обычных, дни для «весь день»)") from None
+        all_day = args.get("all_day") is not None and bool(args["all_day"])
+        if all_day:
+            # Для события «весь день» длительность задаётся в днях: 1 = 1 день.
+            duration = timedelta(days=max(1, duration_val or 1))
+        else:
+            duration = timedelta(minutes=max(1, duration_val or 60))
         rrule = None
         if args.get("rrule"):
             rrule = _normalize_rrule(args["rrule"])
@@ -708,13 +717,13 @@ class CalendarAgent:
         payload = {
             "summary": summary,
             "start": start,
-            "duration": timedelta(minutes=duration),
+            "duration": duration,
             "location": (args.get("location") or "").strip() or None,
             "description": (args.get("description") or "").strip() or None,
             "rrule": rrule,
         }
         if args.get("all_day") is not None:
-            payload["all_day"] = bool(args["all_day"])
+            payload["all_day"] = all_day
         if args.get("alarms") is not None:
             payload["alarms"] = _norm_alarms(args["alarms"])
         if args.get("categories") is not None:
