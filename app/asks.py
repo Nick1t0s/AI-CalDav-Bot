@@ -69,6 +69,6 @@ def kb_ask(options: list[str]) -> Optional[ReplyKeyboardMarkup]:
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
-        one_time_keyboard=False,
+        one_time_keyboard=True,
         input_field_placeholder="Ответьте или выберите вариант",
     )
