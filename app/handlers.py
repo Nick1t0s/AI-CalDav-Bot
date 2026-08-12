@@ -203,14 +203,11 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
         content = format_done(result.text, result.items)
         content += "\n\n" + format_plan(result.plan)
         chunks = chunk_html(content)
-        for chunk in chunks[:-1]:
-            await message.answer(chunk)
-        last = chunks[-1]
-        try:
-            msg = await message.answer(last, reply_markup=ReplyKeyboardRemove())
-            await msg.edit_reply_markup(reply_markup=kb_plan_confirm(op_id))
-        except Exception:
-            await message.answer(last, reply_markup=kb_plan_confirm(op_id))
+        for i, chunk in enumerate(chunks):
+            if i == len(chunks) - 1:
+                await message.answer(chunk, reply_markup=kb_plan_confirm(op_id))
+            else:
+                await message.answer(chunk, reply_markup=ReplyKeyboardRemove() if i == 0 else None)
     else:
         chunks = chunk_html(format_done(result.text or "🤷 Не понял, что сделать.", result.items))
         for i, chunk in enumerate(chunks):
