@@ -149,7 +149,7 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
         content += "\n\n" + format_plan(result.plan)
         plan_msg = await message.answer(content, reply_markup=ReplyKeyboardRemove())
         try:
-            await plan_msg.edit_reply_markup(reply_markup=kb_plan_confirm(op_id))
+            await plan_msg.edit_text(content, reply_markup=kb_plan_confirm(op_id))
         except Exception:
             await message.answer("Подтвердите:", reply_markup=kb_plan_confirm(op_id))
     else:
