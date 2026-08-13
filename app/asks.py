@@ -15,6 +15,7 @@ from typing import Optional
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 ASK_TTL_SECONDS = 15 * 60
+ASK_CANCEL_LABEL = "❌ Отмена"
 
 _BUTTON_LABEL_MAX = 40
 
@@ -56,12 +57,13 @@ def cleanup_expired() -> None:
 # ---------- клавиатуры ----------
 
 
-def kb_ask(options: list[str]) -> Optional[ReplyKeyboardMarkup]:
+def kb_ask(options: list[str], cancel_label: str = ASK_CANCEL_LABEL) -> Optional[ReplyKeyboardMarkup]:
     """Reply-клавиатура вариантов ответа (пользователь может и написать свой)."""
     if not options:
         return None
     buttons = [KeyboardButton(text=o[:_BUTTON_LABEL_MAX]) for o in options]
     rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([KeyboardButton(text=cancel_label[:_BUTTON_LABEL_MAX])])
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,

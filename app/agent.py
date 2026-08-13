@@ -12,7 +12,8 @@
 показываются кнопкой подтверждения (см. handlers.py) и исполняются скриптом.
 
 История сообщений, план и ожидающие вопросы хранятся на каждый chat_id
-(in-memory, с TTL).
+(in-memory, без истечения: сессия живёт до перезапуска бота; ожидающий вопрос
+можно прервать кнопкой «Отмена», см. cancel_pending_asks).
 """
 from __future__ import annotations
 
@@ -20,7 +21,6 @@ import json
 import logging
 import re
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
@@ -207,7 +207,10 @@ SYSTEM_TEMPLATE = """Ты — ассистент, который управля�
 (уточняющий вопрос — ход ставится на паузу и продолжится после ответа пользователя). Обычный текст \
 без инструментов недопустим. За один вызов можно вернуть несколько инструментов (например, \
 get_period + ask_user) — они выполнятся в указанном порядке, но вопросы задавай только после сбора \
-нужных данных и только по одному за раз.
+нужных данных и только по одному за раз. НИКОГДА не вызывай done и ask_user за один шаг: ход не \
+завершится до ответа пользователя на вопрос, а твой финальный ответ (done) будет отложен/потерян. \
+Если нужен уточняющий вопрос — задай его отдельным ходом (ask_user), дождись ответа и только потом \
+завершай ход через done.
 
 Дата сегодня: {date} ({date_dmy}). Сейчас: {time}. Часовой пояс: {tz}.
 
@@ -221,6 +224,10 @@ get_period + ask_user) — они выполнятся в указанном п�
 1б. Событие, которое уже закончилось к текущему времени, всё равно существует: «прошло» — \
 это не «нет события». Отвечая про конкретную дату («что у меня 11 августа»), перечисляй ВСЕ \
 события этого дня, включая уже прошедшие. Не скрывай их и не пиши «событий нет».
+1в. События, которые уже начались или закончились (то есть в прошлом), без ЯВНОГО требования \
+пользователя не изменяй и не удаляй: откажись, объяснив, что событие уже в прошлом. Только прямое \
+указание пользователя («удали всё равно», «сделай так, несмотря на прошлое» и т.п.) позволяет \
+действовать с таким событием.
 2. «ближайшее/следующее/предстоящее» — вызови get_period на разумный период вперёд \
 (например, от сегодня до +30 дней) и выбери событие с ближайшей датой. Не угадывай дату сам.
 3. Если get_period вернул «Ничего не найдено» — в done ответь «Удалять нечего», «Событий нет» и т.п., \
@@ -254,6 +261,8 @@ ask_user (question: «Удалить одно вхождение или всю �
 9. Создание (op="add"): summary и start обязательны (start — YYYY-MM-DDTHH:MM:SS в часовом поясе \
 пользователя), duration в минутах (по умолчанию 60). Повтор: «каждый понедельник» → \
 FREQ=WEEKLY;BYDAY=MO, «по будням» → FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR, «каждый день» → FREQ=DAILY. \
+Назначая конкретные дни недели (BYDAY) — ВСЕГДА задавай freq='WEEKLY' (FREQ=WEEKLY;BYDAY=…). \
+НИКОГДА не комбинируй BYDAY с FREQ=DAILY. \
 Для недельного повтора день недели в start обязан совпадать с BYDAY: если дата не указана, возьми \
 ближайший от сегодня подходящий день (например, для BYDAY=TU при сегодняшней пятнице — следующий \
 вторник). Событие «весь день»: all_day: true и duration в днях (по умолчанию 1). Дополнительно можно \
@@ -269,6 +278,7 @@ date вхождения.
 summary, start, duration, all_day, location, description, link, alarms, categories, status, \
 transp, priority, rrule (либо freq/interval/byday/until/count). Обновляется ТОЛЬКО целый объект \
 (одиночное событие или вся серия, UID сохраняется); одно вхождение серии — только exclude + add. \
+При правке дней недели серии (byday) всегда указывай freq='WEEKLY', не оставляй FREQ=DAILY. \
 При переносе недельной серии на другой день недели правило повтора (BYDAY) обновится автоматически. \
 Чтобы «снять весь день» у вседневного события — обязательно укажи all_day: false и время в start. \
 Если у вседневного события задаёшь длительность в минутах (например, 90) — бот сам превратит \
@@ -414,22 +424,12 @@ class CalendarAgent:
 
     # ---------- сессии ----------
 
-    def _prune(self) -> None:
-        now = time.time()
-        ttl = config.AGENT_SESSION_TTL_MIN * 60
-        with self._lock:
-            for chat_id in list(self._sessions):
-                if now - self._sessions[chat_id]["ts"] > ttl:
-                    del self._sessions[chat_id]
-
     def _session(self, chat_id: int) -> dict:
-        now = time.time()
         with self._lock:
             sess = self._sessions.get(chat_id)
-            if sess is None or now - sess["ts"] > config.AGENT_SESSION_TTL_MIN * 60:
-                sess = {"messages": [], "refs": {}, "plan": [], "pending_asks": [], "ts": now}
+            if sess is None:
+                sess = {"messages": [], "refs": {}, "plan": [], "pending_asks": []}
                 self._sessions[chat_id] = sess
-            sess["ts"] = now
             return sess
 
     def _append(self, chat_id: int, msg: dict) -> None:
@@ -544,6 +544,27 @@ class CalendarAgent:
                 return True
             return all(q["answered"] for q in sess["pending_asks"])
 
+    def cancel_pending_asks(self, chat_id: int) -> bool:
+        """Отменить ожидающие вопросы агента (кнопка «Отмена»).
+
+        Каждому неотвеченному вопросу дописывается tool-ответ, чтобы история
+        для LLM оставалась валидной (родительский tool_calls → tool). План
+        текущего хода сбрасывается. Возвращает True, если отменено ≥1 вопроса.
+        """
+        with self._chat_lock(chat_id):
+            sess = self._session(chat_id)
+            unanswered = [q for q in sess["pending_asks"] if not q["answered"]]
+            if not unanswered:
+                return False
+            for q in unanswered:
+                consume_ask_op(q["ask_id"])
+                self._append(chat_id, {"role": "tool", "tool_call_id": q["tool_call_id"], "content": "Пользователь отменил действие."})
+                q["answered"] = True
+            sess["pending_asks"] = []
+            sess["plan"] = []
+            logger.debug("AGENT chat=%s отмена: вопросов=%d", chat_id, len(unanswered))
+            return True
+
     # ---------- цикл ----------
 
     def _loop(self, chat_id: int) -> AgentResult:
@@ -560,7 +581,12 @@ class CalendarAgent:
                 logger.debug("AGENT chat=%s шаг=%d текст без инструментов: %r", chat_id, step + 1, final)
                 self._append(chat_id, {"role": "assistant", "content": final or "—"})
                 self._session(chat_id)["plan"] = []
-                return AgentResult(kind="error", text="Не удалось завершить ход — агент не вызвал done. Попробуйте ещё раз.")
+                if not final:
+                    return AgentResult(
+                        kind="error",
+                        text="Не удалось завершить ход — агент не вызвал done. Попробуйте ещё раз.",
+                    )
+                return AgentResult(kind="done", text=final)
 
             self._append(chat_id, self._to_assistant_msg(choice))
             logger.debug("AGENT chat=%s шаг=%d tool_calls=%d", chat_id, step + 1, len(tool_calls))
@@ -618,7 +644,6 @@ class CalendarAgent:
 
     def run(self, chat_id: int, user_text: str) -> AgentResult:
         with self._chat_lock(chat_id):
-            self._prune()
             sess = self._session(chat_id)
             unanswered = [q for q in sess["pending_asks"] if not q["answered"]]
             if unanswered:
@@ -639,7 +664,6 @@ class CalendarAgent:
     def resume(self, chat_id: int) -> AgentResult:
         """Продолжить цикл после ответов на все вопросы раунда."""
         with self._chat_lock(chat_id):
-            self._prune()
             sess = self._session(chat_id)
             if any(not q["answered"] for q in sess["pending_asks"]):
                 return AgentResult(kind="ask")
@@ -965,3 +989,7 @@ def answer_ask(chat_id: int, ask_id: str, content: str) -> bool:
 
 def append_assistant_text(chat_id: int, text: str) -> None:
     _agent.append_assistant_text(chat_id, text)
+
+
+def cancel_pending_asks(chat_id: int) -> bool:
+    return _agent.cancel_pending_asks(chat_id)

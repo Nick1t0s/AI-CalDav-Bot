@@ -16,8 +16,8 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from app import config
-from app.agent import AgentError, append_assistant_text, run_agent
-from app.asks import cleanup_expired as cleanup_asks, kb_ask
+from app.agent import AgentError, append_assistant_text, cancel_pending_asks, run_agent
+from app.asks import ASK_CANCEL_LABEL, kb_ask
 from app.caldav_service import (
     create_event,
     delete_event,
@@ -131,9 +131,14 @@ async def on_message(message: Message) -> None:
     if not await _check_allowed(message):
         return
     cleanup_expired()
-    cleanup_asks()
     text = message.text.strip()
     if not text or text.startswith("/"):
+        return
+    if text == ASK_CANCEL_LABEL:
+        if cancel_pending_asks(message.from_user.id):
+            await message.answer("❌ Отменено.", reply_markup=ReplyKeyboardRemove())
+        else:
+            await message.answer("Нет активного вопроса.", reply_markup=ReplyKeyboardRemove())
         return
     await message.bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
     _cancel_pending_plan(message.chat.id)
@@ -155,7 +160,6 @@ async def on_voice(message: Message) -> None:
     if not await _check_allowed(message):
         return
     cleanup_expired()
-    cleanup_asks()
     await message.bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
     _cancel_pending_plan(message.chat.id)
     try:
@@ -171,6 +175,12 @@ async def on_voice(message: Message) -> None:
         )
     except STTError as exc:
         await message.answer(f"😕 Не удалось распознать голосовое: {esc(str(exc))}")
+        return
+    if text.strip() == ASK_CANCEL_LABEL:
+        if cancel_pending_asks(message.from_user.id):
+            await message.answer("❌ Отменено.", reply_markup=ReplyKeyboardRemove())
+        else:
+            await message.answer("Нет активного вопроса.", reply_markup=ReplyKeyboardRemove())
         return
     echo = f"🍀 Распознано: «{esc(text)}»"
     if len(echo) > 4000:
