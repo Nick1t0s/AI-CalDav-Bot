@@ -428,7 +428,7 @@ AI-CalDav-Bot/
 |---|---|---|
 | `LIST_DEFAULT_DAYS` | `90` | Запасной период для `get_period`, если модель не передала даты (теперь они обязательны — константа почти не используется). |
 | `AGENT_MAX_STEPS` | `8` | Максимум итераций агентного цикла на одно сообщение (защита от зацикливания). |
-| `AGENT_SESSION_TTL_MIN` | `30` | Сколько минут живёт сессия диалога в памяти. |
+| `AGENT_SESSION_TTL_MIN` | `30` | **Не используется** (убран): сессии диалогов больше не истекают, живут до перезапуска бота. |
 | `AGENT_HISTORY_LIMIT` | `30` | Максимум сообщений истории, которые уходят модели. |
 | `AGENT_CATALOG_LIMIT` | `50` | Максимум строк одиночных событий в каталоге для модели. |
 
@@ -527,7 +527,6 @@ AI-CalDav-Bot/
     "refs":         {...},  # {"e1": EventData | list[EventData], ...}
     "plan":         [...],  # накопленный список PlanAction
     "pending_asks": [...],  # ожидающие вопросы раунда
-    "ts":           1723..., # время последней активности (для TTL)
 }
 ```
 
@@ -553,9 +552,12 @@ Long polling в `main.py` (`dp.start_polling(bot)`) получает Update. Dis
 - `_check_allowed(message)` (`handlers.py:77`) — если `ALLOWED_USER_IDS` пуст,
   пишет «⛔ Доступ запрещён: не настроен ALLOWED_USER_IDS.» и выходит; если
   `message.from_user.id` не в списке — «⛔ Доступ запрещён.» и выход.
-- `cleanup_expired()` (из `confirmation.py`) — чистит протухшие планы.
-- `cleanup_asks()` (из `asks.py`) — чистит протухшие вопросы.
-- `text = message.text.strip()`; пустой текст или начинающийся с `/` — выходим
+- `text = message.text.strip()`; если это кнопка «❌ Отмена»
+  (`ASK_CANCEL_LABEL`) — `cancel_pending_asks(user_id)` отменяет ожидающие
+  вопросы: отвечающие tool_call'ы получают результат «Пользователь отменил
+  действие.», чистятся `pending_asks` и `plan`, пользователю отправляется
+  «❌ Отменено.» (или «Нет активного вопроса.»).
+- пустой текст или начинающийся с `/` — выходим
   (команды `/start`, `/help` обрабатываются отдельными обработчиками).
 - `message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)` — показать
   «бот печатает…».
@@ -576,7 +578,6 @@ Long polling в `main.py` (`dp.start_polling(bot)`) получает Update. Dis
 ```
 run(chat_id, text):
   with self._chat_lock(chat_id):          # блокировка чата
-      self._prune()                       # выкинуть сессии старше TTL
       sess = self._session(chat_id)       # взять (или создать) сессию
       unanswered = [вопросы, на которые ещё не ответили]
       if unanswered:
@@ -692,7 +693,6 @@ on_message(text="Это вхождение")
 `plan_confirm` или `cancel`. Обработчик `on_callback` (`handlers.py:188`).
 
 **Шаг 2. Проверки:**
-- `cleanup_expired()` — чистим протухшие операции.
 - разбор `op_id`, `action`.
 - `op = get(op_id)`; если нет — «Операция устарела, попробуйте ещё раз» (alert).
 - если `cb.from_user.id != op.user_id` — «Это не ваша операция.» (alert).
@@ -748,7 +748,7 @@ on_message(text="Это вхождение")
               ▼                                    ▼
     on_message  (handlers.py:108)            on_callback (188)
       │  _check_allowed                         │
-      │  cleanup_expired / cleanup_asks         │  проверки: get,
+      │  «Отмена» → cancel_pending_asks         │  проверки: get,
       │  send_chat_action(TYPING)               │  owner == user_id
       │  _cancel_pending_plan                   │
       ▼                                         ▼
@@ -957,10 +957,8 @@ on_message(text="Это вхождение")
 Методы сессий:
 
 - `_chat_lock(chat_id)` — достать (или создать) блокировку чата.
-- `_prune()` — удаляет сессии, у которых `ts` старше
-  `AGENT_SESSION_TTL_MIN * 60` секунд. Вызывается в начале `run`/`resume`.
-- `_session(chat_id)` — вернуть сессию; если её нет (или протухла) — создать
-  новую и обновить `ts`.
+- (TTL убран: `_prune()` удалён, сессии не истекают.)
+- `_session(chat_id)` — вернуть сессию; если её нет — создать новую.
 - `_append(chat_id, msg)` — добавить сообщение в историю и **обрезать** её
   (`_trim_history`).
 - `_append_tool_response(chat_id, tool_call_id, content)` — добавить
@@ -1188,18 +1186,16 @@ rrule, alarms)`; для delete — `(ev.url)`; для exclude — `(ev.url, да
 
 ## 6.5. `confirmation.py` — реестр планов и кнопка
 
-- **`CALLBACK_PREFIX = "op:"`**, **`OP_TTL_SECONDS = 15 * 60`** (15 минут).
+- **`CALLBACK_PREFIX = "op:"`**.
 - `BaseOp` — dataclass с `user_id`.
 - `PlanAction` — см. раздел 4.2.
 - `PlanOp(BaseOp)` — `user_id` + `actions`.
-- `PENDING: dict[str, BaseOp]` и `_CREATED_AT: dict[str, float]` — два словаря:
-  операции и время их создания.
-- `register(op)` — генерирует `op_id = uuid4().hex[:12]`, кладёт в `PENDING` и
-  `_CREATED_AT`, возвращает `op_id`.
+- `PENDING: dict[str, BaseOp]` — словарь операций.
+- `register(op)` — генерирует `op_id = uuid4().hex[:12]`, кладёт в `PENDING`,
+  возвращает `op_id`.
 - `get(op_id)` — вернуть операцию (не извлекая).
 - `consume(op_id)` — извлечь **и удалить** (одноразовое использование).
-- `cleanup_expired()` — удаляет операции старше 15 минут (вызывается при каждом
-  новом сообщении и callback).
+- (TTL убран: `cleanup_expired()` удалён, планы живут до перезапуска бота.)
 - `kb_plan_confirm(op_id)` — `InlineKeyboardMarkup` с одной строкой из двух
   кнопок: «✅ Выполнить всё» (callback `op:<id>:plan_confirm`) и «❌ Отмена»
   (callback `op:<id>:cancel`).
@@ -1209,17 +1205,18 @@ rrule, alarms)`; для delete — `(ev.url)`; для exclude — `(ev.url, да
 
 ## 6.6. `asks.py` — реестр вопросов и reply-клавиатуры вариантов
 
-- **`ASK_TTL_SECONDS = 15 * 60`**.
 - `AskQ` — см. раздел 4.4.
-- `register_ask(q)` → `ask_id`; `get_ask`; `consume_ask`; `cleanup_expired` —
-  реестр нужен для ветки «ответ текстом» (путь C): `run()` достаёт вопрос по
-  `ask_id` из сессии агента.
+- `register_ask(q)` → `ask_id`; `get_ask`; `consume_ask`;
+  `cancel_pending_asks(user_id)` — отменяет ожидающие вопросы (кнопка «Отмена»):
+  отвечает на tool_call'ы «Пользователь отменил действие.», чистит `pending_asks`
+  и `plan`. Реестр нужен для ветки «ответ текстом» (путь C): `run()` достаёт
+  вопрос по `ask_id` из сессии агента.
 - `kb_ask(options)` — **reply-клавиатура** (`ReplyKeyboardMarkup` из
   `KeyboardButton`). Если `options` пуст — `None` (без кнопок). Текст кнопки
   обрезается до 40 символов (`_BUTTON_LABEL_MAX`), кнопки раскладываются по 2 в
-  ряд. `resize_keyboard=True`, `input_field_placeholder="Ответьте или выберите
-  вариант"`. Нажатие отправляет текст кнопки как обычное сообщение — inline
-  callback'ов `ask:…` больше нет.
+  ряд, внизу — кнопка «Отмена» (`ASK_CANCEL_LABEL`). `resize_keyboard=True`,
+  `input_field_placeholder="Ответьте или выберите вариант"`. Нажатие отправляет
+  текст кнопки как обычное сообщение — inline callback'ов `ask:…` больше нет.
 
 ## 6.7. `caldav_service.py` — работа с календарём
 
@@ -1574,13 +1571,15 @@ result = await asyncio.to_thread(run_agent, message.from_user.id, text)
    callback-обработчике (`_check_allowed`).
 5. **Проверка владельца операции.** В `on_callback` проверяется
    `cb.from_user.id == op.user_id`.
-6. **TTL операций.** Планы (`confirmation.py`) и вопросы (`asks.py`) живут 15
-   минут и чистятся `cleanup_expired()`.
+6. **Кнопка «Отмена» для вопросов.** Ожидающий вопрос агента можно прервать
+   сообщением «❌ Отмена»: tool_call получает «Пользователь отменил действие.»,
+   план очищается.
 7. **Лимит шагов** `AGENT_MAX_STEPS` — модель не может крутить цикл бесконечно.
 8. **Валидация аргументов инструментов** (даты, RRULE, ref, enum'ы, числа) —
    модель не протолкнёт мусор в план.
-9. **Строгий `done`.** Ход без терминального `done`/`ask_user` — ошибка, план
-   при этом очищается.
+9. **Строгий `done`.** Ход без терминального `done`/`ask_user` — если модель
+   ответила текстом без tool_calls, текст считается ответом (`done` без плана);
+   пустой ответ — ошибка, план при этом очищается.
 10. **«Не выдумывать».** Промпт требует сначала `get_period`; даже если модель
     «захотела бы» что-то выдумать, read-only слой не даст ей писать.
 11. **Одноразовость операций.** `consume` извлекает операцию из реестра — по

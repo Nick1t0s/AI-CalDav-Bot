@@ -7,16 +7,13 @@
 """
 from __future__ import annotations
 
-import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
-ASK_TTL_SECONDS = 15 * 60
 ASK_CANCEL_LABEL = "❌ Отмена"
-
 _BUTTON_LABEL_MAX = 40
 
 
@@ -31,27 +28,16 @@ class AskQ:
 
 
 PENDING: dict[str, AskQ] = {}
-_CREATED_AT: dict[str, float] = {}
 
 
 def register_ask(q: AskQ) -> str:
     ask_id = uuid.uuid4().hex[:12]
     PENDING[ask_id] = q
-    _CREATED_AT[ask_id] = time.time()
     return ask_id
 
 
 def consume_ask(ask_id: str) -> Optional[AskQ]:
-    _CREATED_AT.pop(ask_id, None)
     return PENDING.pop(ask_id, None)
-
-
-def cleanup_expired() -> None:
-    now = time.time()
-    for ask_id in list(PENDING):
-        if now - _CREATED_AT.get(ask_id, 0) > ASK_TTL_SECONDS:
-            PENDING.pop(ask_id, None)
-            _CREATED_AT.pop(ask_id, None)
 
 
 # ---------- клавиатуры ----------

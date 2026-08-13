@@ -114,7 +114,8 @@ docker compose up -d --build                  # запуск в Docker
 | `OPENAI_THINKING` | `OPENAI_THINKING` | `"enabled"` (см. ниже) |
 | `REQUESTS_TIMEOUT_SECONDS` | `REQUESTS_TIMEOUT_SECONDS` | `60` |
 | `LIST_DEFAULT_DAYS` | `LIST_DEFAULT_DAYS` | `90` |
-| `AGENT_MAX_STEPS / SESSION_TTL_MIN / HISTORY_LIMIT / CATALOG_LIMIT` | `AGENT_*` | `8` / `30` / `30` / `50` |
+| `AGENT_MAX_STEPS / HISTORY_LIMIT / CATALOG_LIMIT` | `AGENT_*` | `8` / `30` / `50` |
+| `AGENT_SESSION_TTL_MIN` | `AGENT_SESSION_TTL_MIN` | `30` — **не используется**: сессии больше не истекают |
 
 `OPENAI_THINKING == "disabled"` → в `agent._ask` добавляется
 `extra_body={"reasoning": {"enabled": False}, "thinking": {"type": "disabled"}}`
@@ -172,12 +173,15 @@ STT-настройки (`app/stt.py`): `STT_API_KEY` (если пуст — бе
     `_run_update_action` — реальные мутации через `caldav_service`.
 
 `on_message` (важно):
-1. проверка доступа; `cleanup_expired()` (планы) и `cleanup_asks()` (вопросы);
+1. проверка доступа;
 2. пустой текст или `/...` → return;
-3. `send_chat_action(TYPING)`;
-4. `_cancel_pending_plan(chat_id)` — новый запрос отменяет старый план;
-5. `result = await asyncio.to_thread(run_agent, message.from_user.id, text)`;
-6. `_handle_result(...)`. Ключ сессии агента — `message.from_user.id`, не chat.id.
+3. текст == `ASK_CANCEL_LABEL` («❌ Отмена») → `cancel_pending_asks(user_id)`:
+   отменённые вопросы получают tool-ответ «Пользователь отменил действие.», чистятся
+   `pending_asks` и `plan`; ответ «❌ Отменено.» / «Нет активного вопроса.»;
+4. `send_chat_action(TYPING)`;
+5. `_cancel_pending_plan(chat_id)` — новый запрос отменяет старый план;
+6. `result = await asyncio.to_thread(run_agent, message.from_user.id, text)`;
+7. `_handle_result(...)`. Ключ сессии агента — `message.from_user.id`, не chat.id.
 
 `on_callback` (важно):
 - разбор `op:<op_id>:<action>`; `op = get(op_id)`; нет → alert «Операция устарела»;
@@ -211,19 +215,20 @@ STT-настройки (`app/stt.py`): `STT_API_KEY` (если пуст — бе
     "refs":         {...},  # {"e1": EventData | list[EventData], ...}
     "plan":         [...],  # накопленные PlanAction
     "pending_asks": [...],  # {ask_id, tool_call_id, question, options, posted, answered}
-    "ts":           float,  # последняя активность (TTL = AGENT_SESSION_TTL_MIN*60)
 }
 ```
 Блокировки: `_lock` (RLock, словари) + `_chat_lock(chat_id)` (RLock на каждый
-чат — сериализация сообщений одного пользователя). `_prune()` удаляет сессии
-по TTL.
+чат — сериализация сообщений одного пользователя). Сессии **не истекают**
+(TTL убран): живут в памяти до перезапуска бота; ожидающий вопрос прерывается
+кнопкой «Отмена» (`cancel_pending_asks`).
 
 **Цикл.** `run(chat_id, user_text)` → (если есть неотвеченные вопросы — текст
 становится ответом на первый, иначе добавляется как user-сообщение) → `_loop()`.
 `_loop()` крутит до `AGENT_MAX_STEPS` шагов: собирает `[system] + messages`,
 вызывает `_ask(...)`, обрабатывает пачку `tool_calls`. Если в пачке был
 `ask_user` — пауза (`kind="ask"`); если `done` — `kind="done"` с планом; если
-пачка пустая или без терминала — `kind="error"`. `resume(chat_id)` продолжает
+пачка пустая — ответ модели непустым текстом возвращается как `kind="done"`
+(без плана), пустой текст — `kind="error"`. `resume(chat_id)` продолжает
 цикл после ответов на вопросы раунда. `answer_ask(...)` подставляет ответ как
 результат инструмента; возвращает `True`, когда отвечены все вопросы раунда.
 
@@ -294,24 +299,23 @@ freq/interval/byday/until/count), `_align_weekly_byday` (перенос неде
 
 ### 3.6 `app/confirmation.py` — реестр планов и кнопка
 
-- `CALLBACK_PREFIX = "op:"`, `OP_TTL_SECONDS = 15*60`.
+- `CALLBACK_PREFIX = "op:"`.
 - Dataclass'ы: `BaseOp(user_id)`, `PlanAction(kind, event, payload, scope, changes)`,
   `PlanOp(BaseOp, actions)`.
-- Реестр: `PENDING: dict[str, BaseOp]`, `_CREATED_AT: dict[str, float]`;
-  `register(op) -> op_id` (uuid4().hex[:12]), `get`, `consume` (извлечь+удалить),
-  `cleanup_expired()` (TTL 15 мин).
+- Реестр: `PENDING: dict[str, BaseOp]`; `register(op) -> op_id` (uuid4().hex[:12]),
+  `get`, `consume` (извлечь+удалить). TTL нет: план живёт до перезапуска бота.
 - `kb_plan_confirm(op_id)` — inline-кнопки «✅ Выполнить всё» (`plan_confirm`) /
   «❌ Отмена» (`cancel`). Callback-формат: `op:<op_id>:<action>`.
 
-**Что править:** время жизни планов, кнопки/лейблы подтверждения, формат callback — здесь.
+**Что править:** кнопки/лейблы подтверждения, формат callback — здесь.
 
 ### 3.7 `app/asks.py` — реестр вопросов и reply-клавиатуры
 
-- `ASK_TTL_SECONDS = 15*60`.
 - Dataclass `AskQ(user_id, tool_call_id, question, options)`.
-- Реестр: `register_ask`, `consume_ask`, `cleanup_expired`.
+- Реестр: `register_ask`, `consume_ask`.
 - `kb_ask(options) -> ReplyKeyboardMarkup | None` — **reply-клавиатура**
-  (кнопки по 2 в ряд, максимум 40 символов на кнопку, `one_time_keyboard=True`).
+  (кнопки по 2 в ряд, максимум 40 символов на кнопку, `one_time_keyboard=True`,
+  внизу кнопка «Отмена» = `ASK_CANCEL_LABEL`).
   Нажатие отправляет текст кнопки как обычное сообщение (путь через `on_message`).
 
 **Что править:** варианты ответов, раскладку кнопок, текст подсказки — здесь.
@@ -397,11 +401,11 @@ PlanAction).
 ### 4.3 `PlanOp` / `AskQ` / `AgentResult` / сессия
 
 - `PlanOp(BaseOp)`: `user_id` + `actions: list[PlanAction]`. Хранится в
-  `confirmation.PENDING`, живёт 15 мин, одноразовый (`consume`).
+  `confirmation.PENDING`, одноразовый (`consume`), TTL нет.
 - `AskQ`: `user_id`, `tool_call_id`, `question`, `options`. Реестр в `asks.py`.
 - `AgentResult`: `kind` (`done`|`ask`|`error`), `text`, `items`, `plan`,
   `questions` (список `{"ask_id", "question", "options"}`).
-- Сессия агента: `{"messages", "refs", "plan", "pending_asks", "ts"}` (см. 3.4).
+- Сессия агента: `{"messages", "refs", "plan", "pending_asks"}` (см. 3.4).
   `refs` — связь токенов `[eN]` из каталога с реальными объектами; `_build_*`
   берут из него объекты по `ref`.
 
@@ -435,12 +439,12 @@ PlanAction).
 - **Изменить работу с RRULE/EXDATE/RDATE/сериями** → caldav_service.py:
   `_patch_rrule`, `_align_weekly_byday`, `exclude_occurrence`, `update_event`;
   промпт `agent.py` (правила 7–8).
-- **Изменить подтверждение плана (кнопки, TTL, текст)** → confirmation.py
-  (`kb_plan_confirm`, `OP_TTL_SECONDS`) + handlers.py `on_callback` +
+- **Изменить подтверждение плана (кнопки, текст)** → confirmation.py
+  (`kb_plan_confirm`) + handlers.py `on_callback` +
   formatting.py `format_plan`/`_plan_action_line`.
-- **Изменить вопросы агента (клавиатуру, варианты)** → asks.py (`kb_ask`,
-  `ASK_TTL_SECONDS`) + formatting.py `format_ask` + agent.py (`_register_ask`,
-  правило 11 в промпте).
+- **Изменить вопросы агента (клавиатуру, варианты, отмену)** → asks.py (`kb_ask`,
+  `ASK_CANCEL_LABEL`) + formatting.py `format_ask` + agent.py (`_register_ask`,
+  `cancel_pending_asks`, правило 11 в промпте).
 - **Изменить тексты сообщений бота** → formatting.py (для агентных) и handlers.py
   (`INTRO`, `_run_*` строки результатов, сообщения ошибок).
 - **Изменить распознавание голосовых / STT** → `stt.py` (`transcribe_audio`,
@@ -451,7 +455,7 @@ PlanAction).
 - **Изменить каталог, который видит модель** → formatting.py
   `format_catalog_compact`/`describe_event` + лимит `config.AGENT_CATALOG_LIMIT`.
 - **Добавить фильтр доступа / безопасность** → handlers.py `_check_allowed`,
-  `_PENDING_PLANS`; confirmation/asks TTL.
+  `_PENDING_PLANS`; отмена вопросов/планов — кнопки «Отмена».
 - **Добавить тест** → проекту нужны юнит-тесты; кандидаты-чистые функции:
   `agent._resolve_period`, `_normalize_rrule`, `_build_*`, `_action_key`,
   `_norm_changes`; `formatting.describe_rrule`, `format_catalog_compact`,

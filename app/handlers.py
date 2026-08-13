@@ -28,7 +28,6 @@ from app.stt import STTError, transcribe_audio
 from app.confirmation import (
     PlanAction,
     PlanOp,
-    cleanup_expired,
     consume,
     get,
     register,
@@ -130,7 +129,6 @@ async def on_message(message: Message) -> None:
         return
     if not await _check_allowed(message):
         return
-    cleanup_expired()
     text = message.text.strip()
     if not text or text.startswith("/"):
         return
@@ -159,7 +157,6 @@ async def on_voice(message: Message) -> None:
         return
     if not await _check_allowed(message):
         return
-    cleanup_expired()
     await message.bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
     _cancel_pending_plan(message.chat.id)
     try:
@@ -230,7 +227,6 @@ async def _handle_result(message: Message, result, user_id: int = None) -> None:
 
 @router.callback_query(F.data.startswith("op:"))
 async def on_callback(cb: CallbackQuery) -> None:
-    cleanup_expired()
     if cb.message.chat.type != ChatType.PRIVATE:
         await cb.answer("Бот работает только в личных сообщениях.", show_alert=True)
         return
